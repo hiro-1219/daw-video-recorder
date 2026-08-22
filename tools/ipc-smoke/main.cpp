@@ -201,8 +201,9 @@ int main()
     if (exerciseCapture)
     {
         std::uint64_t totalBufferedFrames{};
-        const auto validateTake = [&totalBufferedFrames](const dawvr::FinalizedTakeInfo& take,
-                                                         const char* label) {
+        std::uint64_t totalDiscardedTailFrames{};
+        const auto validateTake = [&totalBufferedFrames, &totalDiscardedTailFrames](
+                                      const dawvr::FinalizedTakeInfo& take, const char* label) {
             const juce::File video(take.videoPath);
             const juce::File metadata(take.metadataPath);
             if (!video.existsAsFile() || video.getSize() == 0 || !metadata.existsAsFile())
@@ -215,7 +216,11 @@ int main()
             if (metadataObject == nullptr
                 || !metadataObject->hasProperty("first_frame_monotonic_time_ns")
                 || !metadataObject->hasProperty("sync_offset_ns")
-                || !metadataObject->hasProperty("buffered_frame_count"))
+                || !metadataObject->hasProperty("buffered_frame_count")
+                || !metadataObject->hasProperty("last_frame_monotonic_time_ns")
+                || !metadataObject->hasProperty("end_sync_offset_ns")
+                || !metadataObject->hasProperty("discarded_tail_frame_count")
+                || !metadataObject->hasProperty("stop_holdback_exceeded"))
             {
                 std::cerr << label << " take metadata has no timing correlation\n";
                 return false;
@@ -226,17 +231,30 @@ int main()
                 metadataObject->getProperty("sync_offset_ns"));
             const auto bufferedFrames = static_cast<juce::int64>(
                 metadataObject->getProperty("buffered_frame_count"));
+            const auto lastFrame =
+                metadataObject->getProperty("last_frame_monotonic_time_ns");
+            const auto endSyncOffset = static_cast<juce::int64>(
+                metadataObject->getProperty("end_sync_offset_ns"));
+            const auto discardedTailFrames = static_cast<juce::int64>(
+                metadataObject->getProperty("discarded_tail_frame_count"));
+            const auto holdbackExceeded = static_cast<bool>(
+                metadataObject->getProperty("stop_holdback_exceeded"));
             if (firstFrame.isVoid() || syncOffset < 0 || syncOffset > 1000000000
-                || bufferedFrames < 0)
+                || bufferedFrames < 0 || lastFrame.isVoid() || endSyncOffset > 0
+                || endSyncOffset < -1000000000 || discardedTailFrames < 0
+                || holdbackExceeded)
             {
                 std::cerr << label << " take timing correlation is invalid\n";
                 return false;
             }
             totalBufferedFrames += static_cast<std::uint64_t>(bufferedFrames);
+            totalDiscardedTailFrames += static_cast<std::uint64_t>(discardedTailFrames);
             std::cout << label << " MP4 bytes: " << video.getSize() << '\n';
             std::cout << label << " metadata: " << metadata.getFullPathName() << '\n';
             std::cout << label << " sync offset ns: " << syncOffset
                       << ", buffered frames: " << bufferedFrames << '\n';
+            std::cout << label << " end sync offset ns: " << endSyncOffset
+                      << ", discarded tail frames: " << discardedTailFrames << '\n';
             return true;
         };
         if (!validateTake(firstFinalizedTake, "First")
@@ -253,6 +271,11 @@ int main()
         {
             std::cerr << "Prepared capture did not recover any frame from the ring buffer\n";
             return 15;
+        }
+        if (totalDiscardedTailFrames == 0U)
+        {
+            std::cerr << "Logical stop did not discard any IPC-latency tail frame\n";
+            return 17;
         }
         std::cout << "Prepared start acknowledgement ms: "
                   << preparedStartAcknowledgementMs << '\n';

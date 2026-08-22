@@ -26,10 +26,18 @@ pub struct TakeMetadata {
     #[serde(default)]
     pub first_frame_monotonic_time_ns: Option<i64>,
     pub sync_offset_ns: i64,
+    #[serde(default)]
+    pub last_frame_monotonic_time_ns: Option<i64>,
+    #[serde(default)]
+    pub end_sync_offset_ns: Option<i64>,
     pub frame_count: u64,
     pub dropped_frame_count: u64,
     #[serde(default)]
     pub buffered_frame_count: u64,
+    #[serde(default)]
+    pub discarded_tail_frame_count: u64,
+    #[serde(default)]
+    pub stop_holdback_exceeded: bool,
     pub warnings: Vec<String>,
     pub finalization_status: String,
 }
@@ -75,9 +83,13 @@ mod tests {
             start_monotonic_time_ns: 10,
             first_frame_monotonic_time_ns: Some(12),
             sync_offset_ns: 0,
+            last_frame_monotonic_time_ns: Some(20),
+            end_sync_offset_ns: Some(-2),
             frame_count: 1_800,
             dropped_frame_count: 0,
             buffered_frame_count: 2,
+            discarded_tail_frame_count: 3,
+            stop_holdback_exceeded: false,
             warnings: Vec::new(),
             finalization_status: "complete".into(),
         };
@@ -116,5 +128,9 @@ mod tests {
         let restored: TakeMetadata = serde_json::from_value(value).unwrap();
         assert_eq!(restored.first_frame_monotonic_time_ns, None);
         assert_eq!(restored.buffered_frame_count, 0);
+        assert_eq!(restored.last_frame_monotonic_time_ns, None);
+        assert_eq!(restored.end_sync_offset_ns, None);
+        assert_eq!(restored.discarded_tail_frame_count, 0);
+        assert!(!restored.stop_holdback_exceeded);
     }
 }

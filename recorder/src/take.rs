@@ -181,7 +181,7 @@ impl TakeCoordinator {
             .get(runtime_instance_id)
             .ok_or_else(|| TakeError::NotPrepared(runtime_instance_id.to_owned()))?
             .capture
-            .end_recording()?;
+            .end_recording(stop_snapshot.callback_monotonic_time_ns)?;
         tracing::info!(
             runtime_instance_id,
             take_id = %active.take_id,
@@ -202,7 +202,10 @@ impl TakeCoordinator {
             .map_or(0, |first_frame| {
                 first_frame.saturating_sub(active.start_snapshot.callback_monotonic_time_ns)
             });
-        let warnings = if stats.first_frame_monotonic_time_ns.is_some() {
+        let end_sync_offset_ns = stats
+            .last_frame_monotonic_time_ns
+            .map(|last_frame| last_frame.saturating_sub(stop_snapshot.callback_monotonic_time_ns));
+        let mut warnings = if stats.first_frame_monotonic_time_ns.is_some() {
             vec![
                 "camera timestamps are correlated at frame delivery; camera sensor latency is not calibrated"
                     .into(),
@@ -210,6 +213,12 @@ impl TakeCoordinator {
         } else {
             vec!["no captured frame was available for DAW clock correlation".into()]
         };
+        if stats.stop_holdback_exceeded {
+            warnings.push(
+                "DAW stop notification exceeded the output holdback; the video contains frames after the logical stop"
+                    .into(),
+            );
+        }
         let metadata = TakeMetadata {
             schema_version: 1,
             take_id: active.take_id.clone(),
@@ -230,9 +239,13 @@ impl TakeCoordinator {
             start_monotonic_time_ns: active.start_snapshot.callback_monotonic_time_ns,
             first_frame_monotonic_time_ns: stats.first_frame_monotonic_time_ns,
             sync_offset_ns,
+            last_frame_monotonic_time_ns: stats.last_frame_monotonic_time_ns,
+            end_sync_offset_ns,
             frame_count: stats.frame_count,
             dropped_frame_count: stats.dropped_frame_count,
             buffered_frame_count: stats.buffered_frame_count,
+            discarded_tail_frame_count: stats.discarded_tail_frame_count,
+            stop_holdback_exceeded: stats.stop_holdback_exceeded,
             warnings,
             finalization_status: "complete".into(),
         };

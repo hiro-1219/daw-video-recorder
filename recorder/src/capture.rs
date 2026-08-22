@@ -15,6 +15,9 @@ pub struct CaptureStats {
     pub dropped_frame_count: u64,
     pub buffered_frame_count: u64,
     pub first_frame_monotonic_time_ns: Option<i64>,
+    pub last_frame_monotonic_time_ns: Option<i64>,
+    pub discarded_tail_frame_count: u64,
+    pub stop_holdback_exceeded: bool,
 }
 
 #[derive(Debug, Error)]
@@ -52,6 +55,7 @@ enum CaptureCommand {
         response: mpsc::SyncSender<Result<(), CaptureError>>,
     },
     End {
+        logical_stop_monotonic_time_ns: i64,
         response: mpsc::SyncSender<Result<CaptureStats, CaptureError>>,
     },
     Shutdown,
@@ -118,10 +122,14 @@ impl CaptureHandle {
             })?
     }
 
-    pub fn end_recording(&self) -> Result<CaptureStats, CaptureError> {
+    pub fn end_recording(
+        &self,
+        logical_stop_monotonic_time_ns: i64,
+    ) -> Result<CaptureStats, CaptureError> {
         let (response_sender, response_receiver) = mpsc::sync_channel(1);
         self.commands
             .send(CaptureCommand::End {
+                logical_stop_monotonic_time_ns,
                 response: response_sender,
             })
             .map_err(|_| CaptureError::CommandDisconnected("stopping recording"))?;
@@ -196,6 +204,8 @@ mod platform {
         u32::from_ne_bytes(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0.to_ne_bytes());
     const PRE_ROLL_DURATION_NS: i64 = 2_000_000_000;
     const MAX_PRE_ROLL_FRAMES: usize = 90;
+    const OUTPUT_HOLDBACK_DURATION_NS: i64 = 2_000_000_000;
+    const MAX_PENDING_OUTPUT_FRAMES: usize = 90;
     const CLOCK_CORRELATION_TOLERANCE_NS: i64 = 10_000_000_000;
 
     struct PlatformGuard {
@@ -373,6 +383,7 @@ mod platform {
         writer: IMFSinkWriter,
         stream: u32,
         first_timestamp: Option<i64>,
+        pending_frames: VecDeque<BufferedFrame>,
         stats: CaptureStats,
     }
 
@@ -382,6 +393,7 @@ mod platform {
         monotonic_time_ns: i64,
         duration: Option<i64>,
         flags: Option<u32>,
+        from_arm_buffer: bool,
     }
 
     struct QpcClock {
@@ -427,6 +439,7 @@ mod platform {
             writer,
             stream,
             first_timestamp: None,
+            pending_frames: VecDeque::new(),
             stats: CaptureStats::default(),
         })
     }
@@ -443,6 +456,7 @@ mod platform {
             .stats
             .first_frame_monotonic_time_ns
             .get_or_insert(monotonic_time_ns);
+        active.stats.last_frame_monotonic_time_ns = Some(monotonic_time_ns);
         // SAFETY: The sample belongs to this thread. Sink Writer timestamps start at zero.
         unsafe {
             sample.SetSampleTime(source_timestamp.saturating_sub(origin))?;
@@ -459,6 +473,7 @@ mod platform {
         sample: &IMFSample,
         source_timestamp: i64,
         monotonic_time_ns: i64,
+        from_arm_buffer: bool,
     ) -> Result<BufferedFrame, CaptureError> {
         // SAFETY: The returned contiguous buffer remains locked only while its bytes are copied.
         let buffer = unsafe { sample.ConvertToContiguousBuffer() }?;
@@ -486,6 +501,7 @@ mod platform {
             // SAFETY: These getters only read optional attributes from this sample.
             duration: unsafe { sample.GetSampleDuration() }.ok(),
             flags: unsafe { sample.GetSampleFlags() }.ok(),
+            from_arm_buffer,
         })
     }
 
@@ -522,7 +538,7 @@ mod platform {
             &sample,
             frame.source_timestamp,
             frame.monotonic_time_ns,
-            true,
+            frame.from_arm_buffer,
         )
     }
 
@@ -548,18 +564,66 @@ mod platform {
             {
                 buffered_frames.pop_front();
             }
-            while let Some(frame) = buffered_frames.pop_front() {
-                write_buffered_frame(&mut active, &frame)?;
-            }
+            active.pending_frames.append(buffered_frames);
         } else {
             buffered_frames.clear();
         }
         Ok(active)
     }
 
-    fn finalize_writer(active: &ActiveWriter) -> Result<CaptureStats, CaptureError> {
+    fn flush_aged_frames(active: &mut ActiveWriter) -> Result<(), CaptureError> {
+        loop {
+            let should_flush = active.pending_frames.len() > MAX_PENDING_OUTPUT_FRAMES
+                || active.pending_frames.front().is_some_and(|oldest| {
+                    active.pending_frames.back().is_some_and(|newest| {
+                        newest
+                            .monotonic_time_ns
+                            .saturating_sub(oldest.monotonic_time_ns)
+                            > OUTPUT_HOLDBACK_DURATION_NS
+                    })
+                });
+            if !should_flush {
+                return Ok(());
+            }
+            let frame = active
+                .pending_frames
+                .pop_front()
+                .expect("a flushable output queue is not empty");
+            write_buffered_frame(active, &frame)?;
+        }
+    }
+
+    fn finalize_writer(
+        mut active: ActiveWriter,
+        logical_stop_monotonic_time_ns: Option<i64>,
+    ) -> Result<CaptureStats, CaptureError> {
+        if let Some(logical_stop) = logical_stop_monotonic_time_ns {
+            active.stats.stop_holdback_exceeded = active
+                .stats
+                .last_frame_monotonic_time_ns
+                .is_some_and(|last_written| last_written > logical_stop);
+            while active
+                .pending_frames
+                .front()
+                .is_some_and(|frame| frame.monotonic_time_ns <= logical_stop)
+            {
+                let frame = active
+                    .pending_frames
+                    .pop_front()
+                    .expect("the pending output queue was checked as non-empty");
+                write_buffered_frame(&mut active, &frame)?;
+            }
+            active.stats.discarded_tail_frame_count = u64::try_from(active.pending_frames.len())
+                .expect("pending frame count always fits in u64");
+            active.pending_frames.clear();
+        } else {
+            while let Some(frame) = active.pending_frames.pop_front() {
+                write_buffered_frame(&mut active, &frame)?;
+            }
+        }
         tracing::info!(
             frames = active.stats.frame_count,
+            discarded_tail_frames = active.stats.discarded_tail_frame_count,
             "finalizing Media Foundation sink writer"
         );
         // SAFETY: BeginWriting succeeded and no further samples are submitted after Finalize.
@@ -626,7 +690,7 @@ mod platform {
                             .map(|writer| {
                                 tracing::info!(
                                     path = %output_path.display(),
-                                    buffered_frames = writer.stats.buffered_frame_count,
+                                    buffered_frames = writer.pending_frames.len(),
                                     "prepared capture started recording"
                                 );
                                 active_writer = Some(writer);
@@ -634,16 +698,21 @@ mod platform {
                         };
                         let _ = response.send(result);
                     }
-                    Ok(CaptureCommand::End { response }) => {
+                    Ok(CaptureCommand::End {
+                        logical_stop_monotonic_time_ns,
+                        response,
+                    }) => {
                         let result = active_writer
                             .take()
                             .ok_or(CaptureError::NotRecording)
-                            .and_then(|writer| finalize_writer(&writer));
+                            .and_then(|writer| {
+                                finalize_writer(writer, Some(logical_stop_monotonic_time_ns))
+                            });
                         let _ = response.send(result);
                     }
                     Ok(CaptureCommand::Shutdown) | Err(TryRecvError::Disconnected) => {
                         if let Some(writer) = active_writer.take() {
-                            let _ = finalize_writer(&writer);
+                            let _ = finalize_writer(writer, None);
                         }
                         break 'capture;
                     }
@@ -680,9 +749,12 @@ mod platform {
             let source_delta_ns = timestamp.saturating_sub(source_anchor).saturating_mul(100);
             let frame_monotonic_time_ns = monotonic_anchor.saturating_add(source_delta_ns);
             if let Some(active) = active_writer.as_mut() {
-                submit_sample(active, &sample, timestamp, frame_monotonic_time_ns, false)?;
+                let frame =
+                    copy_buffered_frame(&sample, timestamp, frame_monotonic_time_ns, false)?;
+                active.pending_frames.push_back(frame);
+                flush_aged_frames(active)?;
             } else {
-                let frame = copy_buffered_frame(&sample, timestamp, frame_monotonic_time_ns)?;
+                let frame = copy_buffered_frame(&sample, timestamp, frame_monotonic_time_ns, true)?;
                 buffered_frames.push_back(frame);
                 while buffered_frames.len() > MAX_PRE_ROLL_FRAMES
                     || buffered_frames.front().is_some_and(|oldest| {
@@ -700,7 +772,7 @@ mod platform {
         }
 
         if let Some(writer) = active_writer.take() {
-            let _ = finalize_writer(&writer);
+            let _ = finalize_writer(writer, None);
         }
         drop(reader);
         drop(source);

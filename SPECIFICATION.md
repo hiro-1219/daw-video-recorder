@@ -305,6 +305,8 @@ Record Arm中はCapture Pipelineを起動し、短時間のリングバッファ
 
 IPCメッセージが遅れて到着した場合も、リングバッファから必要なフレームを取得する。これにより、IPC遅延と録画同期誤差を分離する。
 
+録画中も短時間の確定待ちキューを保持する。DAW録音停止イベントを受信した場合は、イベントに記録された時刻より後の未確定フレームを破棄してから動画を確定する。確定待ち時間を超えるIPC停止については、同期メタデータへ警告を記録する。
+
 ### 8.4 キーフレーム
 
 エンコード済み映像を共有する場合、新しいファイルはデコード可能なキーフレームから開始する必要がある。
@@ -466,12 +468,16 @@ start_host_time_ns optional
 start_monotonic_time_ns
 first_frame_monotonic_time_ns optional
 sync_offset_ns
+last_frame_monotonic_time_ns optional
+end_sync_offset_ns optional
 tempo_events
 time_signature_events
 discontinuity_events
 frame_count
 dropped_frame_count
 buffered_frame_count
+discarded_tail_frame_count
+stop_holdback_exceeded
 warnings
 finalization_status
 ```
