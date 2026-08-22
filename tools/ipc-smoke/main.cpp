@@ -37,6 +37,10 @@ int main()
     sharedClient.setIdentity("ipc-smoke-shared-test", "IPC Shared Camera Test");
     client.setProjectRoot(testProjectRoot.getFullPathName());
     sharedClient.setProjectRoot(testProjectRoot.getFullPathName());
+    client.setEncodingProfile(8'000'000U, 2'000U, true);
+    sharedClient.setEncodingProfile(8'000'000U, 2'000U, true);
+    client.setSyncOffsetNs(50'000'000);
+    sharedClient.setSyncOffsetNs(50'000'000);
     const auto stopClients = [&client, &sharedClient] {
         client.stop();
         sharedClient.stop();
@@ -133,7 +137,8 @@ int main()
     if (client.sentSnapshotCount() == 0U
         || (exerciseCapture && sharedClient.sentSnapshotCount() == 0U))
     {
-        std::cerr << "Concurrent recording starts were not acknowledged\n";
+        std::cerr << "Concurrent recording starts were not acknowledged: "
+                  << client.statusText() << " / " << sharedClient.statusText() << '\n';
         stopClients();
         return 21;
     }
@@ -240,6 +245,19 @@ int main()
             stopClients();
             return 13;
         }
+
+        const auto secondStopAcknowledgementDeadline =
+            juce::Time::getMillisecondCounter() + 10000U;
+        while (client.sentSnapshotCount() < 4U
+               && juce::Time::getMillisecondCounter() < secondStopAcknowledgementDeadline)
+            juce::Thread::sleep(20);
+        if (client.sentSnapshotCount() < 4U)
+        {
+            std::cerr << "Second recording stop was not acknowledged: "
+                      << client.statusText() << '\n';
+            stopClients();
+            return 25;
+        }
     }
 
     const auto sent = client.sentSnapshotCount();
@@ -281,13 +299,18 @@ int main()
             const auto metadataJson = juce::JSON::parse(metadata.loadFileAsString());
             const auto* metadataObject = metadataJson.getDynamicObject();
             if (metadataObject == nullptr
+                || static_cast<int>(metadataObject->getProperty("schema_version")) != 2
                 || !metadataObject->hasProperty("first_frame_monotonic_time_ns")
                 || !metadataObject->hasProperty("sync_offset_ns")
                 || !metadataObject->hasProperty("buffered_frame_count")
                 || !metadataObject->hasProperty("last_frame_monotonic_time_ns")
                 || !metadataObject->hasProperty("end_sync_offset_ns")
                 || !metadataObject->hasProperty("discarded_tail_frame_count")
-                || !metadataObject->hasProperty("stop_holdback_exceeded"))
+                || !metadataObject->hasProperty("stop_holdback_exceeded")
+                || !metadataObject->hasProperty(
+                    "clock_drift_start_frame_monotonic_time_ns")
+                || !metadataObject->hasProperty(
+                    "clock_drift_end_frame_monotonic_time_ns"))
             {
                 std::cerr << label << " take metadata has no timing correlation\n";
                 return false;
@@ -306,10 +329,22 @@ int main()
                 metadataObject->getProperty("discarded_tail_frame_count"));
             const auto holdbackExceeded = static_cast<bool>(
                 metadataObject->getProperty("stop_holdback_exceeded"));
-            if (firstFrame.isVoid() || syncOffset < 0 || syncOffset > 1000000000
+            const auto configuredSyncOffset = static_cast<juce::int64>(
+                metadataObject->getProperty("configured_sync_offset_ns"));
+            const auto encodingBackend =
+                metadataObject->getProperty("encoding_backend").toString();
+            const auto driftStart = metadataObject->getProperty(
+                "clock_drift_start_frame_monotonic_time_ns");
+            const auto driftEnd = metadataObject->getProperty(
+                "clock_drift_end_frame_monotonic_time_ns");
+            if (firstFrame.isVoid() || syncOffset < -2500000000LL || syncOffset > 1000000000
                 || bufferedFrames < 0 || lastFrame.isVoid() || endSyncOffset > 0
                 || endSyncOffset < -1000000000 || discardedTailFrames < 0
-                || holdbackExceeded)
+                || holdbackExceeded || configuredSyncOffset != 50000000
+                || encodingBackend.isEmpty()
+                || !metadataObject->hasProperty("clock_drift_ns")
+                || !metadataObject->hasProperty("clock_drift_ppm") || driftStart.isVoid()
+                || driftEnd.isVoid())
             {
                 std::cerr << label << " take timing correlation is invalid\n";
                 return false;

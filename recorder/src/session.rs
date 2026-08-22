@@ -5,7 +5,12 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::protocol::TransportSnapshot;
+use crate::{
+    encoding::{EncodingProfile, EncodingProfileError},
+    protocol::TransportSnapshot,
+};
+
+const MAX_SYNC_OFFSET_NS: i64 = 5_000_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionStatus {
@@ -31,6 +36,10 @@ pub enum SessionError {
     ProjectRootNotAbsolute,
     #[error("the capture pipeline cannot become ready without a source and project root")]
     NotConfigured,
+    #[error(transparent)]
+    InvalidEncodingProfile(#[from] EncodingProfileError),
+    #[error("sync offset must be between -5000 and 5000 ms: {0} ns")]
+    SyncOffsetOutOfRange(i64),
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +49,8 @@ pub struct RecordingSession {
     instance_label: String,
     selected_source_id: Option<String>,
     project_root: Option<PathBuf>,
+    encoding_profile: EncodingProfile,
+    sync_offset_ns: i64,
     armed_requested: bool,
     status: SessionStatus,
     last_sequence_number: Option<u64>,
@@ -59,6 +70,8 @@ impl RecordingSession {
             instance_label,
             selected_source_id: None,
             project_root: None,
+            encoding_profile: EncodingProfile::default(),
+            sync_offset_ns: 0,
             armed_requested: false,
             status: SessionStatus::Idle,
             last_sequence_number: None,
@@ -101,6 +114,16 @@ impl RecordingSession {
         self.project_root.as_deref()
     }
 
+    #[must_use]
+    pub const fn encoding_profile(&self) -> EncodingProfile {
+        self.encoding_profile
+    }
+
+    #[must_use]
+    pub const fn sync_offset_ns(&self) -> i64 {
+        self.sync_offset_ns
+    }
+
     pub fn select_source(&mut self, source_id: String) -> Result<(), SessionError> {
         if matches!(
             self.status,
@@ -125,6 +148,35 @@ impl RecordingSession {
         }
         self.project_root = Some(project_root);
         self.refresh_preparation_state();
+        Ok(())
+    }
+
+    pub fn set_encoding_profile(
+        &mut self,
+        encoding_profile: EncodingProfile,
+    ) -> Result<(), SessionError> {
+        if matches!(
+            self.status,
+            SessionStatus::Recording | SessionStatus::Finalizing
+        ) {
+            return Err(SessionError::InvalidState(self.status));
+        }
+        self.encoding_profile = encoding_profile.validate()?;
+        self.refresh_preparation_state();
+        Ok(())
+    }
+
+    pub fn set_sync_offset_ns(&mut self, sync_offset_ns: i64) -> Result<(), SessionError> {
+        if matches!(
+            self.status,
+            SessionStatus::Recording | SessionStatus::Finalizing
+        ) {
+            return Err(SessionError::InvalidState(self.status));
+        }
+        if sync_offset_ns.abs() > MAX_SYNC_OFFSET_NS {
+            return Err(SessionError::SyncOffsetOutOfRange(sync_offset_ns));
+        }
+        self.sync_offset_ns = sync_offset_ns;
         Ok(())
     }
 
@@ -322,5 +374,23 @@ mod tests {
         assert!(session.handle_transport(snapshot(2, false)).is_none());
         assert!(session.handle_transport(snapshot(1, true)).is_none());
         assert_eq!(session.status(), SessionStatus::Armed);
+    }
+
+    #[test]
+    fn validates_encoding_profile_and_sync_offset() {
+        let mut session = configured_session();
+        let profile = EncodingProfile {
+            bit_rate: 16_000_000,
+            gop_duration_ms: 1_000,
+            prefer_hardware: false,
+        };
+        session.set_encoding_profile(profile).unwrap();
+        session.set_sync_offset_ns(125_000_000).unwrap();
+        assert_eq!(session.encoding_profile(), profile);
+        assert_eq!(session.sync_offset_ns(), 125_000_000);
+        assert!(matches!(
+            session.set_sync_offset_ns(6_000_000_000),
+            Err(SessionError::SyncOffsetOutOfRange(_))
+        ));
     }
 }

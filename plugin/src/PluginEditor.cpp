@@ -37,6 +37,36 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse)
     browseButton.onClick = [this] { chooseProjectRoot(); };
     addAndMakeVisible(browseButton);
 
+    encodingLabel.setText("Encoding", juce::dontSendNotification);
+    addAndMakeVisible(encodingLabel);
+    encodingSelector.addItem("Efficient H.264 / 4 Mbps", 1);
+    encodingSelector.addItem("Balanced H.264 / 8 Mbps", 2);
+    encodingSelector.addItem("Quality H.264 / 16 Mbps", 3);
+    encodingSelector.setSelectedId(processor.encodingPreset(), juce::dontSendNotification);
+    encodingSelector.onChange = [this] {
+        processor.setEncodingPreset(encodingSelector.getSelectedId());
+    };
+    addAndMakeVisible(encodingSelector);
+
+    hardwareEncoderButton.setToggleState(processor.prefersHardwareEncoding(),
+                                         juce::dontSendNotification);
+    hardwareEncoderButton.onClick = [this] {
+        processor.setPrefersHardwareEncoding(hardwareEncoderButton.getToggleState());
+    };
+    addAndMakeVisible(hardwareEncoderButton);
+
+    syncOffsetLabel.setText("Sync offset", juce::dontSendNotification);
+    addAndMakeVisible(syncOffsetLabel);
+    syncOffsetSlider.setRange(-5'000.0, 5'000.0, 1.0);
+    syncOffsetSlider.setValue(processor.syncOffsetMilliseconds(), juce::dontSendNotification);
+    syncOffsetSlider.setTextValueSuffix(" ms");
+    syncOffsetSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    syncOffsetSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 90, 24);
+    syncOffsetSlider.onValueChange = [this] {
+        processor.setSyncOffsetMilliseconds(syncOffsetSlider.getValue());
+    };
+    addAndMakeVisible(syncOffsetSlider);
+
     serviceStatusLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
     addAndMakeVisible(serviceStatusLabel);
     addAndMakeVisible(metricsLabel);
@@ -44,8 +74,8 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse)
     addAndMakeVisible(lastTakeLabel);
 
     setResizable(true, true);
-    setResizeLimits(480, 300, 1000, 700);
-    setSize(620, 360);
+    setResizeLimits(520, 400, 1000, 800);
+    setSize(680, 460);
     processor.requestSourceRefresh();
     startTimerHz(4);
 }
@@ -78,6 +108,18 @@ void PluginEditor::resized()
     browseButton.setBounds(rootRow.removeFromRight(100));
     rootRow.removeFromRight(8);
     projectRootEditor.setBounds(rootRow);
+    area.removeFromTop(8);
+
+    auto encodingRow = area.removeFromTop(32);
+    encodingLabel.setBounds(encodingRow.removeFromLeft(100));
+    encodingSelector.setBounds(encodingRow.removeFromLeft(280));
+    encodingRow.removeFromLeft(8);
+    hardwareEncoderButton.setBounds(encodingRow);
+    area.removeFromTop(8);
+
+    auto offsetRow = area.removeFromTop(32);
+    syncOffsetLabel.setBounds(offsetRow.removeFromLeft(100));
+    syncOffsetSlider.setBounds(offsetRow);
     area.removeFromTop(16);
 
     serviceStatusLabel.setBounds(area.removeFromTop(28));

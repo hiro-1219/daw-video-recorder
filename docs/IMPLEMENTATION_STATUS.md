@@ -30,17 +30,29 @@ Implemented:
 - Record Arm-time camera preparation with continuous frame warm-up
 - immediate per-take writer switching without reopening the camera between consecutive takes
 - prepared-camera release on disarm, instance removal, and capture failure
-- bounded two-second raw-frame ring buffer while Record Arm is active
+- bounded encoded-GOP ring buffer while Record Arm is active
 - frame timestamps correlated to the Windows performance-counter clock
-- DAW start-edge recovery from the ring buffer using the original audio-callback timestamp
+- DAW start-edge recovery from the encoded GOP ring using the original audio-callback timestamp
 - first-frame synchronization offset and recovered-frame count in take metadata
 - bounded two-second output holdback during recording
 - logical DAW stop-edge trimming before MP4 finalization
 - last-frame synchronization offset and discarded-tail count in take metadata
 - source-ID keyed capture registry shared by multiple VST runtime sessions
 - reference-counted camera preparation and release across sessions
-- one raw-frame copy distributed by shared ownership to independent per-session writers
+- one encoded H.264 packet shared by reference across independent per-session muxers
 - writer-error isolation so one failed output does not terminate the shared camera thread
+- independent Capture Pipelines for different stable camera source IDs
+- profile-keyed shared H.264 Media Foundation transforms for sessions using the same camera
+- separate encoders when bitrate, GOP duration, or hardware preference differs
+- hardware H.264 MFT preference with automatic software MFT fallback
+- encoded GOP ring recovery and keyframe-safe mid-session take starts
+- bounded asynchronous MP4 muxer queues that never block the camera capture thread
+- independent MP4 finalization threads and queue-backpressure error isolation
+- protocol v2 encoding-profile and synchronization-offset configuration
+- VST3 bitrate presets, hardware preference, and -5000 to +5000 ms synchronization offset controls
+- metadata schema v2 with selected encoding backend, configured offset, and clock-drift measurements
+- deterministic 30-minute drift-calculation coverage
+- physical-camera smoke tests for shared hardware/software profiles and two simultaneous cameras
 
 Camera enumeration initializes the complete Media Foundation platform (`MFSTARTUP_FULL`). The
 reduced `MFSTARTUP_LITE` mode returned an empty list for valid UVC devices during Windows testing.
@@ -48,14 +60,12 @@ reduced `MFSTARTUP_LITE` mode returned an empty list for valid UVC devices durin
 Not yet implemented:
 
 - recording-service idle shutdown and full lifetime management
-- camera sensor-latency calibration and long-duration clock-drift measurement
+- automatic camera sensor-latency calibration
 - configurable holdback duration and handling for IPC stalls longer than the holdback window
-- shared H.264 encoder output for sessions using the same profile
-- asynchronous per-writer queues and backpressure isolation from the capture thread
-- encoding-profile selection and format enumeration in the GUI
+- resolution and frame-rate enumeration in the GUI
 - preview shared memory
 - fragmented/recoverable container and interrupted-take recovery
-- Studio One integration and long-duration synchronization tests
+- real-time 30-minute Studio One synchronization acceptance test
 
 ## Verified commands
 
@@ -66,8 +76,10 @@ cargo test --workspace
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Debug --target DAWVideoRecorderPlugin_VST3 -j 4
 cmake --build build --config Debug --target DAWVideoRecorderIpcSmoke -j 4
+cargo test --test capture_smoke -- --ignored --nocapture
+cargo test --test multi_camera_smoke -- --ignored --nocapture
 ```
 
-The IPC smoke test lets two C++ clients automatically launch and connect to the Rust service. It verifies that both clients can arm and record the same physical camera concurrently, receive the same first and last shared frame timestamps, and finalize independent MP4 and metadata paths. One client then records another take while the other remains attached, exercising shared-capture reference lifetime, start/end synchronization, ring recovery, and tail trimming.
+The IPC smoke test lets two C++ clients automatically launch and connect to the Rust service. It verifies protocol v2 profile/offset configuration, metadata schema v2, shared hardware H.264 encoding, the same first and last frame timestamps in independent MP4 files, a second take while another client remains attached, encoded-GOP recovery, and tail trimming. The ignored physical-camera tests exercise hardware/software profile separation and two independent camera pipelines; they are run explicitly on a suitable Windows host.
 
 This environment supplied duplicate `Path` and `PATH` variables. They were normalized in the CMake process before invoking MSBuild; this is an execution-environment workaround, not a project requirement.

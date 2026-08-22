@@ -8,6 +8,7 @@
 #include <juce_core/juce_core.h>
 
 #include <atomic>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -41,6 +42,10 @@ public:
     void setIdentity(juce::String persistentInstanceId, juce::String instanceLabel);
     void setProjectRoot(juce::String projectRoot);
     void setSelectedSource(juce::String sourceId);
+    void setEncodingProfile(std::uint32_t bitRate,
+                            std::uint32_t gopDurationMs,
+                            bool preferHardware);
+    void setSyncOffsetNs(std::int64_t offsetNs);
     void requestSourceRefresh() noexcept;
 
     [[nodiscard]] bool isWorkerRunning() const noexcept;
@@ -78,6 +83,10 @@ private:
     juce::String label { "Camera" };
     juce::String configuredProjectRoot;
     juce::String configuredSourceId;
+    std::uint32_t configuredBitRate { 8'000'000U };
+    std::uint32_t configuredGopDurationMs { 2'000U };
+    bool configuredPreferHardware { true };
+    std::int64_t configuredSyncOffsetNs{};
     std::atomic<std::uint64_t> configurationRevision { 1U };
     std::atomic<bool> sourceRefreshRequested { true };
 
@@ -96,6 +105,10 @@ private:
     bool lastSentArmed{};
     std::string lastSentProjectRoot;
     std::string lastSentSourceId;
+    std::uint32_t lastSentBitRate{};
+    std::uint32_t lastSentGopDurationMs{};
+    bool lastSentPreferHardware{};
+    std::int64_t lastSentSyncOffsetNs { std::numeric_limits<std::int64_t>::min() };
     std::int64_t nextSourceRefreshTimeMs{};
     std::uint64_t requestSequence{};
     std::atomic<std::uint64_t> consumedCount{};

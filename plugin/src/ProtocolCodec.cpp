@@ -9,7 +9,6 @@ namespace dawvr::protocol
 {
 namespace
 {
-constexpr std::uint32_t protocolVersion = 1;
 
 enum WireType : std::uint8_t
 {
@@ -87,7 +86,7 @@ Bytes makeEnvelope(std::uint64_t requestId, std::uint32_t payloadField, const By
 {
     Bytes envelope;
     envelope.reserve(payload.size() + 24U);
-    appendUnsigned(envelope, 1, protocolVersion);
+    appendUnsigned(envelope, 1, currentProtocolVersion);
     appendUnsigned(envelope, 2, requestId);
     appendMessage(envelope, payloadField, payload);
     return envelope;
@@ -309,8 +308,8 @@ bool decodeNested(std::uint32_t payloadField,
 Bytes makeHello(std::uint64_t requestId)
 {
     Bytes hello;
-    appendUnsigned(hello, 1, protocolVersion);
-    appendUnsigned(hello, 2, protocolVersion);
+    appendUnsigned(hello, 1, currentProtocolVersion);
+    appendUnsigned(hello, 2, currentProtocolVersion);
     appendString(hello, 3, "DAW Video Recorder VST3");
     return makeEnvelope(requestId, 10, hello);
 }
@@ -363,6 +362,30 @@ Bytes makeSetArmed(std::uint64_t requestId, std::string_view runtimeInstanceId, 
     appendString(message, 1, runtimeInstanceId);
     appendBool(message, 2, armed);
     return makeEnvelope(requestId, 16, message);
+}
+
+Bytes makeConfigureEncodingProfile(std::uint64_t requestId,
+                                   std::string_view runtimeInstanceId,
+                                   std::uint32_t bitRate,
+                                   std::uint32_t gopDurationMs,
+                                   bool preferHardware)
+{
+    Bytes message;
+    appendString(message, 1, runtimeInstanceId);
+    appendUnsigned(message, 2, bitRate);
+    appendUnsigned(message, 3, gopDurationMs);
+    appendBool(message, 4, preferHardware);
+    return makeEnvelope(requestId, 19, message);
+}
+
+Bytes makeSetSyncOffset(std::uint64_t requestId,
+                        std::string_view runtimeInstanceId,
+                        std::int64_t offsetNs)
+{
+    Bytes message;
+    appendString(message, 1, runtimeInstanceId);
+    appendSigned(message, 2, offsetNs);
+    return makeEnvelope(requestId, 20, message);
 }
 
 Bytes makeTransportBatch(std::uint64_t requestId,

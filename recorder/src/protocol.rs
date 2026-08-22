@@ -10,7 +10,7 @@ pub struct Envelope {
     pub request_id: u64,
     #[prost(
         oneof = "envelope::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 30, 31, 32, 33, 34, 35, 36, 37"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 30, 31, 32, 33, 34, 35, 36, 37"
     )]
     pub payload: Option<envelope::Payload>,
 }
@@ -36,6 +36,10 @@ pub mod envelope {
         TransportSnapshotBatch(super::TransportSnapshotBatch),
         #[prost(message, tag = "18")]
         Heartbeat(super::Heartbeat),
+        #[prost(message, tag = "19")]
+        ConfigureEncodingProfile(super::ConfigureEncodingProfile),
+        #[prost(message, tag = "20")]
+        SetSyncOffset(super::SetSyncOffset),
         #[prost(message, tag = "30")]
         HelloAck(super::HelloAck),
         #[prost(message, tag = "31")]
@@ -152,6 +156,26 @@ pub struct SetArmed {
     pub runtime_instance_id: String,
     #[prost(bool, tag = "2")]
     pub armed: bool,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ConfigureEncodingProfile {
+    #[prost(string, tag = "1")]
+    pub runtime_instance_id: String,
+    #[prost(uint32, tag = "2")]
+    pub bit_rate: u32,
+    #[prost(uint32, tag = "3")]
+    pub gop_duration_ms: u32,
+    #[prost(bool, tag = "4")]
+    pub prefer_hardware: bool,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SetSyncOffset {
+    #[prost(string, tag = "1")]
+    pub runtime_instance_id: String,
+    #[prost(int64, tag = "2")]
+    pub offset_ns: i64,
 }
 
 #[derive(Clone, PartialEq, ::prost::Message)]

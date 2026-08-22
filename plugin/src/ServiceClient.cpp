@@ -9,7 +9,7 @@ namespace dawvr
 {
 namespace
 {
-constexpr auto pipeName = "daw-video-recorder-v1";
+constexpr auto pipeName = "daw-video-recorder-v2";
 constexpr auto maximumMessageBytes = 1024U * 1024U;
 constexpr auto ioTimeoutMilliseconds = 10000;
 constexpr auto maximumBatchSize = 64U;
@@ -123,6 +123,31 @@ void ServiceClient::setSelectedSource(juce::String sourceId)
     if (configuredSourceId == sourceId)
         return;
     configuredSourceId = std::move(sourceId);
+    configurationRevision.fetch_add(1U, std::memory_order_release);
+    notify();
+}
+
+void ServiceClient::setEncodingProfile(std::uint32_t bitRate,
+                                       std::uint32_t gopDurationMs,
+                                       bool preferHardware)
+{
+    const juce::ScopedLock lock(configurationLock);
+    if (configuredBitRate == bitRate && configuredGopDurationMs == gopDurationMs
+        && configuredPreferHardware == preferHardware)
+        return;
+    configuredBitRate = bitRate;
+    configuredGopDurationMs = gopDurationMs;
+    configuredPreferHardware = preferHardware;
+    configurationRevision.fetch_add(1U, std::memory_order_release);
+    notify();
+}
+
+void ServiceClient::setSyncOffsetNs(std::int64_t offsetNs)
+{
+    const juce::ScopedLock lock(configurationLock);
+    if (configuredSyncOffsetNs == offsetNs)
+        return;
+    configuredSyncOffsetNs = offsetNs;
     configurationRevision.fetch_add(1U, std::memory_order_release);
     notify();
 }
@@ -243,7 +268,7 @@ bool ServiceClient::connectAndRegister()
                   requestId,
                   protocol::ResponseKind::helloAck,
                   response)
-        || response.selectedVersion != 1U)
+        || response.selectedVersion != protocol::currentProtocolVersion)
     {
         setStatus(ServiceConnectionState::error, "Protocol negotiation failed");
         pipe.close();
@@ -269,6 +294,10 @@ bool ServiceClient::connectAndRegister()
     appliedConfigurationRevision = 0U;
     lastSentProjectRoot.clear();
     lastSentSourceId.clear();
+    lastSentBitRate = 0U;
+    lastSentGopDurationMs = 0U;
+    lastSentPreferHardware = false;
+    lastSentSyncOffsetNs = std::numeric_limits<std::int64_t>::min();
     lastSentArmed = false;
     nextSourceRefreshTimeMs = 0;
     sourceRefreshRequested.store(true, std::memory_order_release);
@@ -302,10 +331,18 @@ bool ServiceClient::synchronizeConfiguration()
     const auto armed = recordArm.load(std::memory_order_acquire);
     juce::String projectRoot;
     juce::String sourceId;
+    std::uint32_t bitRate{};
+    std::uint32_t gopDurationMs{};
+    bool preferHardware{};
+    std::int64_t syncOffsetNs{};
     {
         const juce::ScopedLock lock(configurationLock);
         projectRoot = configuredProjectRoot;
         sourceId = configuredSourceId;
+        bitRate = configuredBitRate;
+        gopDurationMs = configuredGopDurationMs;
+        preferHardware = configuredPreferHardware;
+        syncOffsetNs = configuredSyncOffsetNs;
     }
     const auto root = projectRoot.toStdString();
     const auto source = sourceId.toStdString();
@@ -331,6 +368,35 @@ bool ServiceClient::synchronizeConfiguration()
                       response))
             return false;
         lastSentProjectRoot = root;
+    }
+
+    if (bitRate != lastSentBitRate || gopDurationMs != lastSentGopDurationMs
+        || preferHardware != lastSentPreferHardware)
+    {
+        const auto requestId = nextRequestId();
+        if (!exchange(protocol::makeConfigureEncodingProfile(requestId,
+                                                             runtimeInstanceId,
+                                                             bitRate,
+                                                             gopDurationMs,
+                                                             preferHardware),
+                      requestId,
+                      protocol::ResponseKind::sessionStateChanged,
+                      response))
+            return false;
+        lastSentBitRate = bitRate;
+        lastSentGopDurationMs = gopDurationMs;
+        lastSentPreferHardware = preferHardware;
+    }
+
+    if (syncOffsetNs != lastSentSyncOffsetNs)
+    {
+        const auto requestId = nextRequestId();
+        if (!exchange(protocol::makeSetSyncOffset(requestId, runtimeInstanceId, syncOffsetNs),
+                      requestId,
+                      protocol::ResponseKind::sessionStateChanged,
+                      response))
+            return false;
+        lastSentSyncOffsetNs = syncOffsetNs;
     }
 
     if (armed != lastSentArmed || revision != appliedConfigurationRevision)
@@ -457,7 +523,8 @@ void ServiceClient::disconnect()
         static_cast<void>(sendMessage(protocol::makeUnregisterInstance(nextRequestId(), runtimeInstanceId)));
     pipe.close();
     runtimeInstanceId.clear();
-    if (!threadShouldExit())
+    if (!threadShouldExit()
+        && currentState.load(std::memory_order_acquire) != ServiceConnectionState::error)
         setStatus(ServiceConnectionState::connecting, "Disconnected; retrying...");
 }
 

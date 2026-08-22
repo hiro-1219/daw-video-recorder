@@ -16,6 +16,8 @@ message Envelope {
     SetArmed set_armed = 16;
     TransportSnapshotBatch transport_snapshot_batch = 17;
     Heartbeat heartbeat = 18;
+    ConfigureEncodingProfile configure_encoding_profile = 19;
+    SetSyncOffset set_sync_offset = 20;
 
     HelloAck hello_ack = 30;
     InstanceRegistered instance_registered = 31;
@@ -87,6 +89,18 @@ message SetProjectRoot {
 message SetArmed {
   string runtime_instance_id = 1;
   bool armed = 2;
+}
+
+message ConfigureEncodingProfile {
+  string runtime_instance_id = 1;
+  uint32 bit_rate = 2;
+  uint32 gop_duration_ms = 3;
+  bool prefer_hardware = 4;
+}
+
+message SetSyncOffset {
+  string runtime_instance_id = 1;
+  int64 offset_ns = 2;
 }
 
 message TransportSnapshot {

@@ -31,6 +31,11 @@ private:
     juce::Label projectRootLabel;
     juce::TextEditor projectRootEditor;
     juce::TextButton browseButton { "Browse..." };
+    juce::Label encodingLabel;
+    juce::ComboBox encodingSelector;
+    juce::ToggleButton hardwareEncoderButton { "Prefer hardware encoder" };
+    juce::Label syncOffsetLabel;
+    juce::Slider syncOffsetSlider;
     juce::Label serviceStatusLabel;
     juce::Label metricsLabel;
     juce::Label lastTakeLabel;

@@ -652,20 +652,21 @@ MyStudioOneSong/
 
 ### Phase 4: 複数インスタンス・複数カメラ
 
-- SessionRegistry
-- カメラ別Capture Pipeline
-- 同一カメラの共有
-- セッション別ファイル出力
-- セッション別エラー分離
+- [x] SessionRegistry
+- [x] カメラ別Capture Pipeline
+- [x] 同一カメラの共有
+- [x] セッション別ファイル出力
+- [x] セッション別エラー分離
 
 ### Phase 5: エンコーダー共有と同期精度
 
-- Encoding Profile単位のEncoderRegistry
-- GOPリングバッファ
-- セッション途中開始
-- ハードウェアエンコーダー
-- オフセット測定と補正
-- 長時間ドリフト試験
+- [x] Encoding Profile単位のEncoderRegistry
+- [x] GOPリングバッファ
+- [x] セッション途中開始
+- [x] ハードウェアエンコーダーとソフトウェアfallback
+- [x] オフセット測定と補正
+- [x] 長時間ドリフト計算の自動試験
+- [ ] Studio Oneを用いた実時間30分以上のドリフト受入試験
 
 ### Phase 6: 配布品質
 

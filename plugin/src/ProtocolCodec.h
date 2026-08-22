@@ -11,6 +11,7 @@
 
 namespace dawvr::protocol
 {
+inline constexpr std::uint32_t currentProtocolVersion = 2U;
 using Bytes = std::vector<std::uint8_t>;
 
 enum class ResponseKind
@@ -69,6 +70,14 @@ struct Response final
 [[nodiscard]] Bytes makeSetArmed(std::uint64_t requestId,
                                 std::string_view runtimeInstanceId,
                                 bool armed);
+[[nodiscard]] Bytes makeConfigureEncodingProfile(std::uint64_t requestId,
+                                                 std::string_view runtimeInstanceId,
+                                                 std::uint32_t bitRate,
+                                                 std::uint32_t gopDurationMs,
+                                                 bool preferHardware);
+[[nodiscard]] Bytes makeSetSyncOffset(std::uint64_t requestId,
+                                      std::string_view runtimeInstanceId,
+                                      std::int64_t offsetNs);
 [[nodiscard]] Bytes makeTransportBatch(std::uint64_t requestId,
                                        std::string_view runtimeInstanceId,
                                        std::span<const TransportSnapshot> snapshots);

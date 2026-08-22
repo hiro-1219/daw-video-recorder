@@ -51,6 +51,12 @@ public:
     [[nodiscard]] std::vector<protocol::CameraSource> availableSources() const;
     [[nodiscard]] std::uint64_t sourceListRevision() const noexcept;
     void requestSourceRefresh() noexcept;
+    [[nodiscard]] int encodingPreset() const noexcept;
+    void setEncodingPreset(int preset);
+    [[nodiscard]] bool prefersHardwareEncoding() const noexcept;
+    void setPrefersHardwareEncoding(bool preferred);
+    [[nodiscard]] double syncOffsetMilliseconds() const noexcept;
+    void setSyncOffsetMilliseconds(double milliseconds);
 
     [[nodiscard]] std::uint64_t droppedSnapshotCount() const noexcept;
     [[nodiscard]] std::uint64_t sentSnapshotCount() const noexcept;
@@ -71,6 +77,9 @@ private:
     juce::String instanceId;
     juce::String selectedProjectRoot;
     juce::String selectedCameraSourceId;
+    int selectedEncodingPreset { 2 };
+    bool hardwareEncodingPreferred { true };
+    std::int64_t configuredSyncOffsetNs{};
 
     std::atomic<bool> recordArmState{};
     SpscQueue<TransportSnapshot, 2048U> transportQueue;

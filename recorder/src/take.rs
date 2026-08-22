@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
 };
@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::{
     capture::{CaptureError, CaptureHandle},
+    encoding::{EncodingProfile, measure_clock_drift},
     metadata::{TakeMetadata, write_json},
     protocol::TransportSnapshot,
 };
@@ -24,6 +25,8 @@ pub struct TakeContext {
     pub source_id: String,
     pub source_display_name: String,
     pub project_root: PathBuf,
+    pub encoding_profile: EncodingProfile,
+    pub sync_offset_ns: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,12 +71,13 @@ struct ActiveTake {
 #[derive(Debug)]
 struct PreparedCapture {
     source_id: String,
+    encoding_profile: EncodingProfile,
 }
 
 #[derive(Debug)]
 struct SharedCapture {
     capture: CaptureHandle,
-    users: HashSet<String>,
+    profile_users: HashMap<EncodingProfile, usize>,
 }
 
 #[derive(Debug, Default)]
@@ -84,14 +88,21 @@ pub struct TakeCoordinator {
 }
 
 impl TakeCoordinator {
-    pub fn prepare(&mut self, runtime_instance_id: &str, source_id: &str) -> Result<(), TakeError> {
+    pub fn prepare(
+        &mut self,
+        runtime_instance_id: &str,
+        source_id: &str,
+        encoding_profile: EncodingProfile,
+    ) -> Result<(), TakeError> {
         if self.active.contains_key(runtime_instance_id) {
             return Err(TakeError::AlreadyActive(runtime_instance_id.to_owned()));
         }
         if self
             .prepared
             .get(runtime_instance_id)
-            .is_some_and(|prepared| prepared.source_id == source_id)
+            .is_some_and(|prepared| {
+                prepared.source_id == source_id && prepared.encoding_profile == encoding_profile
+            })
         {
             return Ok(());
         }
@@ -103,7 +114,7 @@ impl TakeCoordinator {
                 source_id.to_owned(),
                 SharedCapture {
                     capture,
-                    users: HashSet::new(),
+                    profile_users: HashMap::new(),
                 },
             );
         }
@@ -111,17 +122,21 @@ impl TakeCoordinator {
             .captures
             .get_mut(source_id)
             .expect("the shared capture exists after preparation");
-        shared.users.insert(runtime_instance_id.to_owned());
+        if !shared.profile_users.contains_key(&encoding_profile) {
+            shared.capture.prepare_profile(encoding_profile)?;
+        }
+        *shared.profile_users.entry(encoding_profile).or_default() += 1;
         self.prepared.insert(
             runtime_instance_id.to_owned(),
             PreparedCapture {
                 source_id: source_id.to_owned(),
+                encoding_profile,
             },
         );
         tracing::info!(
             runtime_instance_id,
             source_id,
-            users = shared.users.len(),
+            profiles = shared.profile_users.len(),
             "shared camera capture prepared"
         );
         Ok(())
@@ -148,6 +163,9 @@ impl TakeCoordinator {
         if prepared.source_id != context.source_id {
             return Err(TakeError::PreparedSourceMismatch);
         }
+        if prepared.encoding_profile != context.encoding_profile {
+            return Err(TakeError::PreparedSourceMismatch);
+        }
 
         let recordings_root = prepare_recordings_root(&context.project_root)?;
         let now = Utc::now();
@@ -169,7 +187,10 @@ impl TakeCoordinator {
         if let Err(error) = capture.begin_recording(
             context.runtime_instance_id.clone(),
             partial_video_path.clone(),
-            snapshot.callback_monotonic_time_ns,
+            snapshot
+                .callback_monotonic_time_ns
+                .saturating_add(context.sync_offset_ns),
+            context.encoding_profile,
         ) {
             let _ = fs::remove_dir(&take_directory);
             return Err(error.into());
@@ -213,7 +234,9 @@ impl TakeCoordinator {
             .capture
             .end_recording(
                 runtime_instance_id.to_owned(),
-                stop_snapshot.callback_monotonic_time_ns,
+                stop_snapshot
+                    .callback_monotonic_time_ns
+                    .saturating_add(active.context.sync_offset_ns),
             )?;
         tracing::info!(
             runtime_instance_id,
@@ -230,14 +253,28 @@ impl TakeCoordinator {
         }
         fs::rename(&active.partial_video_path, &active.video_path)?;
 
+        let corrected_start_monotonic_time_ns = active
+            .start_snapshot
+            .callback_monotonic_time_ns
+            .saturating_add(active.context.sync_offset_ns);
+        let corrected_stop_monotonic_time_ns = stop_snapshot
+            .callback_monotonic_time_ns
+            .saturating_add(active.context.sync_offset_ns);
         let sync_offset_ns = stats
             .first_frame_monotonic_time_ns
             .map_or(0, |first_frame| {
-                first_frame.saturating_sub(active.start_snapshot.callback_monotonic_time_ns)
+                first_frame.saturating_sub(corrected_start_monotonic_time_ns)
             });
         let end_sync_offset_ns = stats
             .last_frame_monotonic_time_ns
-            .map(|last_frame| last_frame.saturating_sub(stop_snapshot.callback_monotonic_time_ns));
+            .map(|last_frame| last_frame.saturating_sub(corrected_stop_monotonic_time_ns));
+        let drift = measure_clock_drift(
+            active.start_snapshot.project_sample_position,
+            stop_snapshot.project_sample_position,
+            active.start_snapshot.sample_rate,
+            stats.drift_start_frame_monotonic_time_ns,
+            stats.drift_end_frame_monotonic_time_ns,
+        );
         let mut warnings = if stats.first_frame_monotonic_time_ns.is_some() {
             vec![
                 "camera timestamps are correlated at frame delivery; camera sensor latency is not calibrated"
@@ -253,7 +290,7 @@ impl TakeCoordinator {
             );
         }
         let metadata = TakeMetadata {
-            schema_version: 1,
+            schema_version: 2,
             take_id: active.take_id.clone(),
             session_id: active.context.runtime_instance_id.clone(),
             persistent_instance_id: active.context.persistent_instance_id,
@@ -261,7 +298,8 @@ impl TakeCoordinator {
             instance_label: active.context.instance_label,
             source_id: active.context.source_id,
             source_display_name: active.context.source_display_name,
-            encoding_profile: "native-uncompressed-to-h264-mp4".into(),
+            encoding_profile: active.context.encoding_profile.stable_id(),
+            encoding_backend: stats.encoding_backend.as_str().into(),
             output_video_path: active.video_path.to_string_lossy().into_owned(),
             record_started_at: active.started_at,
             record_stopped_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
@@ -272,6 +310,7 @@ impl TakeCoordinator {
             start_monotonic_time_ns: active.start_snapshot.callback_monotonic_time_ns,
             first_frame_monotonic_time_ns: stats.first_frame_monotonic_time_ns,
             sync_offset_ns,
+            configured_sync_offset_ns: active.context.sync_offset_ns,
             last_frame_monotonic_time_ns: stats.last_frame_monotonic_time_ns,
             end_sync_offset_ns,
             frame_count: stats.frame_count,
@@ -279,6 +318,11 @@ impl TakeCoordinator {
             buffered_frame_count: stats.buffered_frame_count,
             discarded_tail_frame_count: stats.discarded_tail_frame_count,
             stop_holdback_exceeded: stats.stop_holdback_exceeded,
+            clock_drift_duration_ns: drift.map(|value| value.duration_ns),
+            clock_drift_ns: drift.map(|value| value.drift_ns),
+            clock_drift_ppm: drift.map(|value| value.drift_ppm),
+            clock_drift_start_frame_monotonic_time_ns: stats.drift_start_frame_monotonic_time_ns,
+            clock_drift_end_frame_monotonic_time_ns: stats.drift_end_frame_monotonic_time_ns,
             warnings,
             finalization_status: "complete".into(),
         };
@@ -330,8 +374,18 @@ impl TakeCoordinator {
             .captures
             .get_mut(&prepared.source_id)
             .is_some_and(|shared| {
-                shared.users.remove(runtime_instance_id);
-                shared.users.is_empty()
+                let remove_profile = shared
+                    .profile_users
+                    .get_mut(&prepared.encoding_profile)
+                    .is_some_and(|users| {
+                        *users = users.saturating_sub(1);
+                        *users == 0
+                    });
+                if remove_profile {
+                    shared.profile_users.remove(&prepared.encoding_profile);
+                    let _ = shared.capture.release_profile(prepared.encoding_profile);
+                }
+                shared.profile_users.is_empty()
             });
         if remove_capture {
             self.captures.remove(&prepared.source_id);

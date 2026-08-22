@@ -3,6 +3,7 @@
 #include "PluginEditor.h"
 
 #include <chrono>
+#include <cmath>
 
 namespace dawvr
 {
@@ -13,6 +14,19 @@ constexpr auto recordArmParameterId = "recordArm";
 constexpr auto instanceIdProperty = "persistentInstanceId";
 constexpr auto projectRootProperty = "projectRoot";
 constexpr auto selectedSourceProperty = "selectedSourceId";
+constexpr auto encodingPresetProperty = "encodingPreset";
+constexpr auto hardwareEncodingProperty = "hardwareEncodingPreferred";
+constexpr auto syncOffsetProperty = "syncOffsetNs";
+
+std::uint32_t bitRateForPreset(int preset)
+{
+    switch (preset)
+    {
+        case 1: return 4'000'000U;
+        case 3: return 16'000'000U;
+        default: return 8'000'000U;
+    }
+}
 } // namespace
 
 PluginProcessor::PluginProcessor()
@@ -162,6 +176,9 @@ void PluginProcessor::getStateInformation(juce::MemoryBlock& destinationData)
     tree.setProperty(instanceIdProperty, instanceId, nullptr);
     tree.setProperty(projectRootProperty, selectedProjectRoot, nullptr);
     tree.setProperty(selectedSourceProperty, selectedCameraSourceId, nullptr);
+    tree.setProperty(encodingPresetProperty, selectedEncodingPreset, nullptr);
+    tree.setProperty(hardwareEncodingProperty, hardwareEncodingPreferred, nullptr);
+    tree.setProperty(syncOffsetProperty, configuredSyncOffsetNs, nullptr);
     if (const auto xml = tree.createXml())
         copyXmlToBinary(*xml, destinationData);
 }
@@ -177,11 +194,18 @@ void PluginProcessor::setStateInformation(const void* data, int sizeInBytes)
     instanceId = tree.getProperty(instanceIdProperty, juce::Uuid().toString()).toString();
     selectedProjectRoot = tree.getProperty(projectRootProperty).toString();
     selectedCameraSourceId = tree.getProperty(selectedSourceProperty).toString();
+    selectedEncodingPreset = juce::jlimit(1, 3, static_cast<int>(tree.getProperty(encodingPresetProperty, 2)));
+    hardwareEncodingPreferred = static_cast<bool>(tree.getProperty(hardwareEncodingProperty, true));
+    configuredSyncOffsetNs = static_cast<juce::int64>(tree.getProperty(syncOffsetProperty, 0));
     if (const auto* arm = state.getRawParameterValue(recordArmParameterId))
         recordArmState.store(arm->load() >= 0.5F, std::memory_order_release);
     serviceClient.setIdentity(instanceId, "Camera");
     serviceClient.setProjectRoot(selectedProjectRoot);
     serviceClient.setSelectedSource(selectedCameraSourceId);
+    serviceClient.setEncodingProfile(bitRateForPreset(selectedEncodingPreset),
+                                     2'000U,
+                                     hardwareEncodingPreferred);
+    serviceClient.setSyncOffsetNs(configuredSyncOffsetNs);
 }
 
 juce::AudioProcessorValueTreeState& PluginProcessor::parameters() noexcept { return state; }
@@ -218,6 +242,44 @@ std::uint64_t PluginProcessor::sourceListRevision() const noexcept
 void PluginProcessor::requestSourceRefresh() noexcept
 {
     serviceClient.requestSourceRefresh();
+}
+
+int PluginProcessor::encodingPreset() const noexcept
+{
+    return selectedEncodingPreset;
+}
+
+void PluginProcessor::setEncodingPreset(int preset)
+{
+    selectedEncodingPreset = juce::jlimit(1, 3, preset);
+    serviceClient.setEncodingProfile(bitRateForPreset(selectedEncodingPreset),
+                                     2'000U,
+                                     hardwareEncodingPreferred);
+}
+
+bool PluginProcessor::prefersHardwareEncoding() const noexcept
+{
+    return hardwareEncodingPreferred;
+}
+
+void PluginProcessor::setPrefersHardwareEncoding(bool preferred)
+{
+    hardwareEncodingPreferred = preferred;
+    serviceClient.setEncodingProfile(bitRateForPreset(selectedEncodingPreset),
+                                     2'000U,
+                                     hardwareEncodingPreferred);
+}
+
+double PluginProcessor::syncOffsetMilliseconds() const noexcept
+{
+    return static_cast<double>(configuredSyncOffsetNs) / 1'000'000.0;
+}
+
+void PluginProcessor::setSyncOffsetMilliseconds(double milliseconds)
+{
+    const auto limited = juce::jlimit(-5'000.0, 5'000.0, milliseconds);
+    configuredSyncOffsetNs = static_cast<std::int64_t>(std::llround(limited * 1'000'000.0));
+    serviceClient.setSyncOffsetNs(configuredSyncOffsetNs);
 }
 
 std::uint64_t PluginProcessor::droppedSnapshotCount() const noexcept

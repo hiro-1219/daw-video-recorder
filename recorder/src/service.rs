@@ -6,6 +6,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
+    encoding::EncodingProfile,
     protocol::{TransportSnapshot, VideoSource},
     session::{RecordingAction, RecordingSession, SessionError, SessionStatus},
     take::{FinalizedTake, TakeContext, TakeCoordinator, TakeError},
@@ -120,13 +121,36 @@ impl RecorderService {
         Ok(status)
     }
 
+    pub fn set_encoding_profile(
+        &mut self,
+        runtime_instance_id: &str,
+        encoding_profile: EncodingProfile,
+    ) -> Result<SessionStatus, ServiceError> {
+        let session = self.session_mut(runtime_instance_id)?;
+        session.set_encoding_profile(encoding_profile)?;
+        Ok(session.status())
+    }
+
+    pub fn set_sync_offset_ns(
+        &mut self,
+        runtime_instance_id: &str,
+        sync_offset_ns: i64,
+    ) -> Result<SessionStatus, ServiceError> {
+        let session = self.session_mut(runtime_instance_id)?;
+        session.set_sync_offset_ns(sync_offset_ns)?;
+        Ok(session.status())
+    }
+
     pub fn prepare_capture(
         &mut self,
         runtime_instance_id: &str,
     ) -> Result<SessionStatus, ServiceError> {
         let context = self.take_context(runtime_instance_id)?;
-        self.takes
-            .prepare(runtime_instance_id, &context.source_id)?;
+        self.takes.prepare(
+            runtime_instance_id,
+            &context.source_id,
+            context.encoding_profile,
+        )?;
         let session = self.session_mut(runtime_instance_id)?;
         session.mark_prepared()?;
         Ok(session.status())
@@ -201,6 +225,8 @@ impl RecorderService {
             source_id: source_id.to_owned(),
             source_display_name: source.display_name.clone(),
             project_root,
+            encoding_profile: session.encoding_profile(),
+            sync_offset_ns: session.sync_offset_ns(),
         })
     }
 

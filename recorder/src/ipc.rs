@@ -11,6 +11,7 @@ use tokio::{
 
 use crate::{
     PROTOCOL_VERSION,
+    encoding::EncodingProfile,
     protocol::{self, Envelope, envelope::Payload},
     service::{RecorderService, ServiceError},
     session::SessionStatus,
@@ -226,6 +227,31 @@ async fn handle_envelope(
             };
             state_or_error(request_id, &runtime_id, result)
         }
+        Payload::ConfigureEncodingProfile(configure) => {
+            let runtime_id = configure.runtime_instance_id;
+            let result = {
+                let mut service = service.lock().await;
+                prepare_if_ready(&mut service, &runtime_id, |service| {
+                    service.set_encoding_profile(
+                        &runtime_id,
+                        EncodingProfile {
+                            bit_rate: configure.bit_rate,
+                            gop_duration_ms: configure.gop_duration_ms,
+                            prefer_hardware: configure.prefer_hardware,
+                        },
+                    )
+                })
+            };
+            state_or_error(request_id, &runtime_id, result)
+        }
+        Payload::SetSyncOffset(set_offset) => {
+            let runtime_id = set_offset.runtime_instance_id;
+            let result = {
+                let mut service = service.lock().await;
+                service.set_sync_offset_ns(&runtime_id, set_offset.offset_ns)
+            };
+            state_or_error(request_id, &runtime_id, result)
+        }
         Payload::TransportSnapshotBatch(batch) => {
             let mut responses = Vec::new();
             let mut service = service.lock().await;
@@ -398,14 +424,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hello_negotiates_protocol_version_one() {
+    async fn hello_negotiates_current_protocol_version() {
         let service = Arc::new(Mutex::new(RecorderService::new()));
         let request = Envelope {
-            protocol_version: 1,
+            protocol_version: PROTOCOL_VERSION,
             request_id: 9,
             payload: Some(Payload::Hello(protocol::Hello {
-                minimum_version: 1,
-                maximum_version: 1,
+                minimum_version: PROTOCOL_VERSION,
+                maximum_version: PROTOCOL_VERSION,
                 client_name: "test".into(),
             })),
         };
@@ -414,7 +440,7 @@ mod tests {
         assert!(matches!(
             responses[0].payload,
             Some(Payload::HelloAck(protocol::HelloAck {
-                selected_version: 1,
+                selected_version: PROTOCOL_VERSION,
                 ..
             }))
         ));
