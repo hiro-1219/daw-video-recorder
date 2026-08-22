@@ -1,0 +1,15 @@
+/build/
+/target/
+/.vs/
+/.vscode/
+/.idea/
+/.agents/
+/.codex/
+*.user
+*.suo
+*.VC.db
+*.VC.VC.opendb
+*.log
+*.tmp
+*.part
+*.recover

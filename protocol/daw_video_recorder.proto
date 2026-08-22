@@ -1,0 +1,149 @@
+syntax = "proto3";
+
+package daw_video_recorder.v1;
+
+message Envelope {
+  uint32 protocol_version = 1;
+  uint64 request_id = 2;
+
+  oneof payload {
+    Hello hello = 10;
+    RegisterInstance register_instance = 11;
+    UnregisterInstance unregister_instance = 12;
+    ListSources list_sources = 13;
+    SelectSource select_source = 14;
+    SetProjectRoot set_project_root = 15;
+    SetArmed set_armed = 16;
+    TransportSnapshotBatch transport_snapshot_batch = 17;
+    Heartbeat heartbeat = 18;
+
+    HelloAck hello_ack = 30;
+    InstanceRegistered instance_registered = 31;
+    SourceList source_list = 32;
+    SessionStateChanged session_state_changed = 33;
+    RecordingFinalized recording_finalized = 34;
+    Error error = 35;
+    HeartbeatAck heartbeat_ack = 36;
+  }
+}
+
+message Hello {
+  uint32 minimum_version = 1;
+  uint32 maximum_version = 2;
+  string client_name = 3;
+}
+
+message HelloAck {
+  uint32 selected_version = 1;
+  string service_version = 2;
+}
+
+message RegisterInstance {
+  string persistent_instance_id = 1;
+  string instance_label = 2;
+}
+
+message InstanceRegistered {
+  string persistent_instance_id = 1;
+  string runtime_instance_id = 2;
+}
+
+message UnregisterInstance {
+  string runtime_instance_id = 1;
+}
+
+message ListSources {}
+
+message VideoFormat {
+  uint32 width = 1;
+  uint32 height = 2;
+  uint32 frames_per_second_numerator = 3;
+  uint32 frames_per_second_denominator = 4;
+  string pixel_format = 5;
+}
+
+message VideoSource {
+  string source_id = 1;
+  string display_name = 2;
+  repeated VideoFormat formats = 3;
+  bool available = 4;
+}
+
+message SourceList {
+  repeated VideoSource sources = 1;
+}
+
+message SelectSource {
+  string runtime_instance_id = 1;
+  string source_id = 2;
+}
+
+message SetProjectRoot {
+  string runtime_instance_id = 1;
+  string project_root = 2;
+}
+
+message SetArmed {
+  string runtime_instance_id = 1;
+  bool armed = 2;
+}
+
+message TransportSnapshot {
+  string runtime_instance_id = 1;
+  uint64 sequence_number = 2;
+  int64 callback_monotonic_time_ns = 3;
+  optional int64 host_time_ns = 4;
+  optional int64 project_sample_position = 5;
+  double sample_rate = 6;
+  bool is_playing = 7;
+  bool is_recording = 8;
+  bool is_looping = 9;
+  bool is_offline_rendering = 10;
+  optional double tempo = 11;
+  optional int32 time_signature_numerator = 12;
+  optional int32 time_signature_denominator = 13;
+  optional double ppq_position = 14;
+}
+
+message TransportSnapshotBatch {
+  repeated TransportSnapshot snapshots = 1;
+}
+
+enum SessionState {
+  SESSION_STATE_UNSPECIFIED = 0;
+  SESSION_STATE_IDLE = 1;
+  SESSION_STATE_PREPARING = 2;
+  SESSION_STATE_ARMED = 3;
+  SESSION_STATE_RECORDING = 4;
+  SESSION_STATE_FINALIZING = 5;
+  SESSION_STATE_ERROR = 6;
+}
+
+message SessionStateChanged {
+  string runtime_instance_id = 1;
+  SessionState state = 2;
+  string detail = 3;
+}
+
+message RecordingFinalized {
+  string runtime_instance_id = 1;
+  string take_id = 2;
+  string video_path = 3;
+  string metadata_path = 4;
+}
+
+message Heartbeat {
+  uint64 sequence_number = 1;
+}
+
+message HeartbeatAck {
+  uint64 sequence_number = 1;
+}
+
+message Error {
+  string code = 1;
+  string message = 2;
+  string runtime_instance_id = 3;
+  string source_id = 4;
+  bool recoverable = 5;
+}
