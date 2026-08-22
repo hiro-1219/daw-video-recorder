@@ -36,7 +36,7 @@ The generated VST3 bundle is placed below `build/plugin/DAWVideoRecorderPlugin_a
 
 ## Current implementation status
 
-The VST3 currently captures host transport snapshots into a real-time-safe SPSC queue. Its background worker drains the queue, but Protocol Buffers serialization and the Named Pipe connection are the next milestone. The Rust service already accepts length-delimited Protocol Buffers over a Windows Named Pipe and implements instance/session state transitions; camera capture and encoding are not connected yet.
+The VST3 captures host transport snapshots into a real-time-safe SPSC queue. Its background worker connects to the Rust service, negotiates protocol v1, registers the plug-in instance, synchronizes Project Root and Record Arm, and sends acknowledged transport batches. Camera capture and encoding are not connected yet.
 
 ## License
 

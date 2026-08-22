@@ -11,7 +11,8 @@
 
 namespace dawvr
 {
-class PluginProcessor final : public juce::AudioProcessor
+class PluginProcessor final : public juce::AudioProcessor,
+                              private juce::AudioProcessorValueTreeState::Listener
 {
 public:
     PluginProcessor();
@@ -47,7 +48,10 @@ public:
     void setProjectRoot(juce::String newProjectRoot);
 
     [[nodiscard]] std::uint64_t droppedSnapshotCount() const noexcept;
+    [[nodiscard]] std::uint64_t sentSnapshotCount() const noexcept;
     [[nodiscard]] bool isTransportWorkerRunning() const noexcept;
+    [[nodiscard]] ServiceConnectionState serviceConnectionState() const noexcept;
+    [[nodiscard]] juce::String serviceStatusText() const;
 
 private:
     template <typename Sample>
@@ -55,11 +59,13 @@ private:
 
     [[nodiscard]] TransportSnapshot captureTransportSnapshot() noexcept;
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
+    void parameterChanged(const juce::String& parameterId, float newValue) override;
 
     juce::AudioProcessorValueTreeState state;
     juce::String instanceId;
     juce::String selectedProjectRoot;
 
+    std::atomic<bool> recordArmState{};
     SpscQueue<TransportSnapshot, 2048U> transportQueue;
     ServiceClient serviceClient;
     std::atomic<std::uint64_t> sequenceNumber{};
@@ -68,4 +74,3 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginProcessor)
 };
 } // namespace dawvr
-

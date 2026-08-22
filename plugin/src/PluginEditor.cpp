@@ -76,15 +76,16 @@ void PluginEditor::resized()
 
 void PluginEditor::timerCallback()
 {
-    const auto workerRunning = processor.isTransportWorkerRunning();
-    serviceStatusLabel.setText(
-        workerRunning ? "Transport worker: running (Named Pipe connection pending)"
-                      : "Transport worker: stopped",
-        juce::dontSendNotification);
-    serviceStatusLabel.setColour(
-        juce::Label::textColourId, workerRunning ? juce::Colours::orange : juce::Colours::red);
+    const auto connectionState = processor.serviceConnectionState();
+    serviceStatusLabel.setText(processor.serviceStatusText(), juce::dontSendNotification);
+    const auto colour = connectionState == ServiceConnectionState::connected
+                            ? juce::Colours::lightgreen
+                            : (connectionState == ServiceConnectionState::error ? juce::Colours::red
+                                                                                : juce::Colours::orange);
+    serviceStatusLabel.setColour(juce::Label::textColourId, colour);
     metricsLabel.setText(
-        "Dropped transport snapshots: " + juce::String(processor.droppedSnapshotCount()),
+        "Transport sent: " + juce::String(processor.sentSnapshotCount())
+            + " / queue drops: " + juce::String(processor.droppedSnapshotCount()),
         juce::dontSendNotification);
 }
 

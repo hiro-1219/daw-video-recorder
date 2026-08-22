@@ -18,6 +18,8 @@ target_sources(DAWVideoRecorderPlugin PRIVATE
     src/PluginEditor.h
     src/PluginProcessor.cpp
     src/PluginProcessor.h
+    src/ProtocolCodec.cpp
+    src/ProtocolCodec.h
     src/ServiceClient.cpp
     src/ServiceClient.h
     src/SpscQueue.h

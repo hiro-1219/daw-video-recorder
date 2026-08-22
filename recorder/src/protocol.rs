@@ -10,7 +10,7 @@ pub struct Envelope {
     pub request_id: u64,
     #[prost(
         oneof = "envelope::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 30, 31, 32, 33, 34, 35, 36"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 30, 31, 32, 33, 34, 35, 36, 37"
     )]
     pub payload: Option<envelope::Payload>,
 }
@@ -50,6 +50,8 @@ pub mod envelope {
         Error(super::Error),
         #[prost(message, tag = "36")]
         HeartbeatAck(super::HeartbeatAck),
+        #[prost(message, tag = "37")]
+        TransportAccepted(super::TransportAccepted),
     }
 }
 
@@ -234,6 +236,14 @@ pub struct Heartbeat {
 pub struct HeartbeatAck {
     #[prost(uint64, tag = "1")]
     pub sequence_number: u64,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TransportAccepted {
+    #[prost(string, tag = "1")]
+    pub runtime_instance_id: String,
+    #[prost(uint64, tag = "2")]
+    pub last_sequence_number: u64,
 }
 
 #[derive(Clone, PartialEq, ::prost::Message)]

@@ -11,6 +11,10 @@ Implemented:
 - allocation-free SPSC handoff from the audio thread
 - non-real-time transport worker
 - versioned Protocol Buffers contract
+- C++ Protocol Buffers-compatible control-message codec
+- C++ Windows Named Pipe client with retry and status reporting
+- Hello/version negotiation and per-instance registration
+- Project Root, Record Arm, and acknowledged Transport batch delivery
 - Rust Windows Named Pipe server and length-delimited framing
 - multiple runtime sessions for duplicated persistent plug-in IDs
 - recording state machine and offline-render suppression
@@ -18,7 +22,7 @@ Implemented:
 
 Not yet implemented:
 
-- C++ Protocol Buffers serialization and Named Pipe client connection
+- recording-service automatic launch and lifetime management
 - Windows camera enumeration and Media Foundation capture
 - preview shared memory
 - encoder/muxer and recoverable media container
@@ -33,6 +37,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Debug --target DAWVideoRecorderPlugin_VST3 -j 4
+cmake --build build --config Debug --target DAWVideoRecorderIpcSmoke -j 4
 ```
+
+The IPC smoke test launches the Rust service and verifies a real C++/Rust round trip through the Windows Named Pipe, including protocol negotiation, registration, configuration, transport delivery, and acknowledgement.
 
 This environment supplied duplicate `Path` and `PATH` variables. They were normalized in the CMake process before invoking MSBuild; this is an execution-environment workaround, not a project requirement.

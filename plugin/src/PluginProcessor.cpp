@@ -20,12 +20,15 @@ PluginProcessor::PluginProcessor()
                          .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
       state(*this, nullptr, stateTreeName, createParameterLayout()),
       instanceId(juce::Uuid().toString()),
-      serviceClient(transportQueue)
+      serviceClient(transportQueue, recordArmState)
 {
+    state.addParameterListener(recordArmParameterId, this);
+    serviceClient.setIdentity(instanceId, "Camera");
 }
 
 PluginProcessor::~PluginProcessor()
 {
+    state.removeParameterListener(recordArmParameterId, this);
     serviceClient.stop();
 }
 
@@ -171,6 +174,10 @@ void PluginProcessor::setStateInformation(const void* data, int sizeInBytes)
     state.replaceState(tree);
     instanceId = tree.getProperty(instanceIdProperty, juce::Uuid().toString()).toString();
     selectedProjectRoot = tree.getProperty(projectRootProperty).toString();
+    if (const auto* arm = state.getRawParameterValue(recordArmParameterId))
+        recordArmState.store(arm->load() >= 0.5F, std::memory_order_release);
+    serviceClient.setIdentity(instanceId, "Camera");
+    serviceClient.setProjectRoot(selectedProjectRoot);
 }
 
 juce::AudioProcessorValueTreeState& PluginProcessor::parameters() noexcept { return state; }
@@ -180,6 +187,7 @@ const juce::String& PluginProcessor::projectRoot() const noexcept { return selec
 void PluginProcessor::setProjectRoot(juce::String newProjectRoot)
 {
     selectedProjectRoot = std::move(newProjectRoot);
+    serviceClient.setProjectRoot(selectedProjectRoot);
 }
 
 std::uint64_t PluginProcessor::droppedSnapshotCount() const noexcept
@@ -187,9 +195,30 @@ std::uint64_t PluginProcessor::droppedSnapshotCount() const noexcept
     return droppedSnapshots.load(std::memory_order_relaxed);
 }
 
+std::uint64_t PluginProcessor::sentSnapshotCount() const noexcept
+{
+    return serviceClient.sentSnapshotCount();
+}
+
 bool PluginProcessor::isTransportWorkerRunning() const noexcept
 {
     return serviceClient.isWorkerRunning();
+}
+
+ServiceConnectionState PluginProcessor::serviceConnectionState() const noexcept
+{
+    return serviceClient.connectionState();
+}
+
+juce::String PluginProcessor::serviceStatusText() const
+{
+    return serviceClient.statusText();
+}
+
+void PluginProcessor::parameterChanged(const juce::String& parameterId, float newValue)
+{
+    if (parameterId == recordArmParameterId)
+        recordArmState.store(newValue >= 0.5F, std::memory_order_release);
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParameterLayout()

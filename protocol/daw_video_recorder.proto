@@ -24,6 +24,7 @@ message Envelope {
     RecordingFinalized recording_finalized = 34;
     Error error = 35;
     HeartbeatAck heartbeat_ack = 36;
+    TransportAccepted transport_accepted = 37;
   }
 }
 
@@ -138,6 +139,11 @@ message Heartbeat {
 
 message HeartbeatAck {
   uint64 sequence_number = 1;
+}
+
+message TransportAccepted {
+  string runtime_instance_id = 1;
+  uint64 last_sequence_number = 2;
 }
 
 message Error {

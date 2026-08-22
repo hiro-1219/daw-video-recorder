@@ -61,13 +61,26 @@ pub async fn serve_connection<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    while let Some(request) = read_envelope(&mut stream).await? {
-        let responses = handle_envelope(request, &service).await;
-        for response in responses {
-            write_envelope(&mut stream, &response).await?;
+    let mut connection_instances = Vec::new();
+    let connection_result = async {
+        while let Some(request) = read_envelope(&mut stream).await? {
+            let responses = handle_envelope(request, &service).await;
+            for response in responses {
+                if let Some(Payload::InstanceRegistered(registered)) = &response.payload {
+                    connection_instances.push(registered.runtime_instance_id.clone());
+                }
+                write_envelope(&mut stream, &response).await?;
+            }
         }
+        Ok(())
     }
-    Ok(())
+    .await;
+
+    let mut service = service.lock().await;
+    for runtime_instance_id in connection_instances {
+        service.unregister_instance(&runtime_instance_id);
+    }
+    connection_result
 }
 
 pub async fn read_envelope<R>(reader: &mut R) -> Result<Option<Envelope>, IpcError>
@@ -213,8 +226,12 @@ async fn handle_envelope(
         Payload::TransportSnapshotBatch(batch) => {
             let mut responses = Vec::new();
             let mut service = service.lock().await;
+            let mut accepted_runtime_id = String::new();
+            let mut accepted_sequence = 0;
             for snapshot in batch.snapshots {
                 let runtime_id = snapshot.runtime_instance_id.clone();
+                accepted_runtime_id.clone_from(&runtime_id);
+                accepted_sequence = snapshot.sequence_number;
                 match service.handle_transport(snapshot) {
                     Ok((status, Some(_))) => {
                         responses.push(state_response(request_id, &runtime_id, status));
@@ -223,6 +240,13 @@ async fn handle_envelope(
                     Err(error) => responses.push(service_error(request_id, &runtime_id, &error)),
                 }
             }
+            responses.push(response(
+                request_id,
+                Payload::TransportAccepted(protocol::TransportAccepted {
+                    runtime_instance_id: accepted_runtime_id,
+                    last_sequence_number: accepted_sequence,
+                }),
+            ));
             responses
         }
         Payload::Heartbeat(heartbeat) => vec![response(
@@ -346,5 +370,50 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[tokio::test]
+    async fn transport_batch_is_always_acknowledged() {
+        let service = Arc::new(Mutex::new(RecorderService::new()));
+        let runtime_id = {
+            let mut locked = service.lock().await;
+            locked
+                .register_instance("persistent".into(), "test".into())
+                .runtime_instance_id()
+                .to_owned()
+        };
+        let request = Envelope {
+            protocol_version: 1,
+            request_id: 10,
+            payload: Some(Payload::TransportSnapshotBatch(
+                protocol::TransportSnapshotBatch {
+                    snapshots: vec![protocol::TransportSnapshot {
+                        runtime_instance_id: runtime_id.clone(),
+                        sequence_number: 99,
+                        callback_monotonic_time_ns: 1,
+                        host_time_ns: None,
+                        project_sample_position: Some(512),
+                        sample_rate: 48_000.0,
+                        is_playing: true,
+                        is_recording: false,
+                        is_looping: false,
+                        is_offline_rendering: false,
+                        tempo: Some(120.0),
+                        time_signature_numerator: Some(4),
+                        time_signature_denominator: Some(4),
+                        ppq_position: Some(0.0),
+                    }],
+                },
+            )),
+        };
+
+        let responses = handle_envelope(request, &service).await;
+        assert!(responses.iter().any(|response| matches!(
+            &response.payload,
+            Some(Payload::TransportAccepted(protocol::TransportAccepted {
+                runtime_instance_id: accepted_runtime_id,
+                last_sequence_number: 99,
+            })) if accepted_runtime_id == &runtime_id
+        )));
     }
 }
