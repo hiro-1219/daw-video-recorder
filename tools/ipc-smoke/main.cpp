@@ -4,7 +4,18 @@
 #include <juce_core/juce_core.h>
 
 #include <atomic>
+#include <chrono>
 #include <iostream>
+
+namespace
+{
+std::int64_t monotonicTimeNs() noexcept
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+} // namespace
 
 int main()
 {
@@ -58,7 +69,7 @@ int main()
 
     dawvr::TransportSnapshot startSnapshot;
     startSnapshot.sequenceNumber = 1U;
-    startSnapshot.callbackMonotonicTimeNs = 1000;
+    startSnapshot.callbackMonotonicTimeNs = monotonicTimeNs();
     startSnapshot.projectSamplePosition = 512;
     startSnapshot.sampleRate = 48000.0;
     startSnapshot.tempo = 120.0;
@@ -86,7 +97,7 @@ int main()
         juce::Thread::sleep(1500);
         auto stopSnapshot = startSnapshot;
         stopSnapshot.sequenceNumber = 2U;
-        stopSnapshot.callbackMonotonicTimeNs = 1500001000;
+        stopSnapshot.callbackMonotonicTimeNs = monotonicTimeNs();
         stopSnapshot.projectSamplePosition = 72512;
         stopSnapshot.flags &= ~dawvr::TransportFlags::recording;
         if (!queue.push(stopSnapshot))
@@ -108,9 +119,22 @@ int main()
         }
         firstFinalizedTake = client.latestFinalizedTake();
 
+        const auto firstStopAcknowledgementDeadline =
+            juce::Time::getMillisecondCounter() + 10000U;
+        while (client.sentSnapshotCount() < 2U
+               && juce::Time::getMillisecondCounter() < firstStopAcknowledgementDeadline)
+            juce::Thread::sleep(20);
+        if (client.sentSnapshotCount() < 2U)
+        {
+            std::cerr << "First recording stop was not acknowledged: " << client.statusText()
+                      << '\n';
+            client.stop();
+            return 16;
+        }
+
         auto secondStartSnapshot = startSnapshot;
         secondStartSnapshot.sequenceNumber = 3U;
-        secondStartSnapshot.callbackMonotonicTimeNs = 2000001000;
+        secondStartSnapshot.callbackMonotonicTimeNs = monotonicTimeNs();
         secondStartSnapshot.projectSamplePosition = 96512;
         const auto secondStartQueuedAt = juce::Time::getMillisecondCounter();
         if (!queue.push(secondStartSnapshot))
@@ -120,7 +144,7 @@ int main()
             return 10;
         }
 
-        const auto secondStartDeadline = juce::Time::getMillisecondCounter() + 5000U;
+        const auto secondStartDeadline = juce::Time::getMillisecondCounter() + 10000U;
         while (client.sentSnapshotCount() < 3U
                && juce::Time::getMillisecondCounter() < secondStartDeadline)
             juce::Thread::sleep(20);
@@ -137,7 +161,7 @@ int main()
         juce::Thread::sleep(1000);
         auto secondStopSnapshot = secondStartSnapshot;
         secondStopSnapshot.sequenceNumber = 4U;
-        secondStopSnapshot.callbackMonotonicTimeNs = 3000001000;
+        secondStopSnapshot.callbackMonotonicTimeNs = monotonicTimeNs();
         secondStopSnapshot.projectSamplePosition = 144512;
         secondStopSnapshot.flags &= ~dawvr::TransportFlags::recording;
         if (!queue.push(secondStopSnapshot))
@@ -176,7 +200,9 @@ int main()
         std::cout << "- " << source.displayName << '\n';
     if (exerciseCapture)
     {
-        const auto validateTake = [](const dawvr::FinalizedTakeInfo& take, const char* label) {
+        std::uint64_t totalBufferedFrames{};
+        const auto validateTake = [&totalBufferedFrames](const dawvr::FinalizedTakeInfo& take,
+                                                         const char* label) {
             const juce::File video(take.videoPath);
             const juce::File metadata(take.metadataPath);
             if (!video.existsAsFile() || video.getSize() == 0 || !metadata.existsAsFile())
@@ -184,8 +210,33 @@ int main()
                 std::cerr << label << " take artifacts are missing\n";
                 return false;
             }
+            const auto metadataJson = juce::JSON::parse(metadata.loadFileAsString());
+            const auto* metadataObject = metadataJson.getDynamicObject();
+            if (metadataObject == nullptr
+                || !metadataObject->hasProperty("first_frame_monotonic_time_ns")
+                || !metadataObject->hasProperty("sync_offset_ns")
+                || !metadataObject->hasProperty("buffered_frame_count"))
+            {
+                std::cerr << label << " take metadata has no timing correlation\n";
+                return false;
+            }
+            const auto firstFrame =
+                metadataObject->getProperty("first_frame_monotonic_time_ns");
+            const auto syncOffset = static_cast<juce::int64>(
+                metadataObject->getProperty("sync_offset_ns"));
+            const auto bufferedFrames = static_cast<juce::int64>(
+                metadataObject->getProperty("buffered_frame_count"));
+            if (firstFrame.isVoid() || syncOffset < 0 || syncOffset > 1000000000
+                || bufferedFrames < 0)
+            {
+                std::cerr << label << " take timing correlation is invalid\n";
+                return false;
+            }
+            totalBufferedFrames += static_cast<std::uint64_t>(bufferedFrames);
             std::cout << label << " MP4 bytes: " << video.getSize() << '\n';
             std::cout << label << " metadata: " << metadata.getFullPathName() << '\n';
+            std::cout << label << " sync offset ns: " << syncOffset
+                      << ", buffered frames: " << bufferedFrames << '\n';
             return true;
         };
         if (!validateTake(firstFinalizedTake, "First")
@@ -197,6 +248,11 @@ int main()
         {
             std::cerr << "Repeated recording reused the previous output path\n";
             return 14;
+        }
+        if (totalBufferedFrames == 0U)
+        {
+            std::cerr << "Prepared capture did not recover any frame from the ring buffer\n";
+            return 15;
         }
         std::cout << "Prepared start acknowledgement ms: "
                   << preparedStartAcknowledgementMs << '\n';

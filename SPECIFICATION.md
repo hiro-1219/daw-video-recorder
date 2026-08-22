@@ -464,12 +464,14 @@ end_project_sample
 sample_rate
 start_host_time_ns optional
 start_monotonic_time_ns
+first_frame_monotonic_time_ns optional
 sync_offset_ns
 tempo_events
 time_signature_events
 discontinuity_events
 frame_count
 dropped_frame_count
+buffered_frame_count
 warnings
 finalization_status
 ```

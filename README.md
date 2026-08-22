@@ -36,9 +36,9 @@ The generated VST3 bundle is placed below `build/plugin/DAWVideoRecorderPlugin_a
 
 ## Current implementation status
 
-The VST3 captures host transport snapshots into a real-time-safe SPSC queue. Its background worker starts and connects to the Rust service, negotiates protocol v1, enumerates Windows cameras, synchronizes the selected camera, Project Root, and Record Arm, and sends acknowledged transport batches. Record Arm prepares and warms the selected Media Foundation camera; DAW recording edges then start and stop per-take H.264 MP4 writers and synchronization JSON below `<Project Root>/Recordings` without reopening the camera between consecutive takes.
+The VST3 captures host transport snapshots into a real-time-safe SPSC queue. Its background worker starts and connects to the Rust service, negotiates protocol v1, enumerates Windows cameras, synchronizes the selected camera, Project Root, and Record Arm, and sends acknowledged transport batches. Record Arm prepares the selected Media Foundation camera and keeps a bounded, timestamped frame ring. DAW recording edges then start and stop per-take H.264 MP4 writers and synchronization JSON below `<Project Root>/Recordings` without reopening the camera between consecutive takes. Frames captured while the start event is in transit over IPC are recovered from the ring using the event's original monotonic timestamp.
 
-The current capture path is the first single-session vertical slice. A timestamped frame pre-roll buffer, shared pipelines for multiple instances using the same camera, interrupted MP4 recovery, preview, and Studio One timing validation remain in progress.
+The current capture path is the first single-session vertical slice. Camera sensor-latency calibration, stop-edge tail trimming, shared pipelines for multiple instances using the same camera, interrupted MP4 recovery, preview, and Studio One timing validation remain in progress.
 
 During development, start the plug-in host from the repository root or set `DAWVR_SERVICE_PATH` to the full path of `daw-video-recorder-service.exe`. Installed builds look for the service at `%LOCALAPPDATA%\DAW Video Recorder\daw-video-recorder-service.exe`.
 

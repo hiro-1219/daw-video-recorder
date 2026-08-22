@@ -30,6 +30,10 @@ Implemented:
 - Record Arm-time camera preparation with continuous frame warm-up
 - immediate per-take writer switching without reopening the camera between consecutive takes
 - prepared-camera release on disarm, instance removal, and capture failure
+- bounded two-second raw-frame ring buffer while Record Arm is active
+- frame timestamps correlated to the Windows performance-counter clock
+- DAW start-edge recovery from the ring buffer using the original audio-callback timestamp
+- first-frame synchronization offset and recovered-frame count in take metadata
 
 Camera enumeration initializes the complete Media Foundation platform (`MFSTARTUP_FULL`). The
 reduced `MFSTARTUP_LITE` mode returned an empty list for valid UVC devices during Windows testing.
@@ -37,7 +41,8 @@ reduced `MFSTARTUP_LITE` mode returned an empty list for valid UVC devices durin
 Not yet implemented:
 
 - recording-service idle shutdown and full lifetime management
-- timestamped frame pre-roll ring buffer and camera-to-DAW clock correlation
+- camera sensor-latency calibration and long-duration clock-drift measurement
+- stop-edge tail trimming using the logical DAW stop timestamp
 - shared capture/encoder pipelines for sessions using the same camera
 - encoding-profile selection and format enumeration in the GUI
 - preview shared memory
@@ -55,6 +60,6 @@ cmake --build build --config Debug --target DAWVideoRecorderPlugin_VST3 -j 4
 cmake --build build --config Debug --target DAWVideoRecorderIpcSmoke -j 4
 ```
 
-The IPC smoke test lets the C++ client automatically launch the Rust service and verifies a real C++/Rust round trip through the Windows Named Pipe, including protocol negotiation, registration, camera enumeration, configuration, transport delivery, and acknowledgement. When a camera is available, it also records and finalizes two consecutive takes through one prepared capture pipeline and verifies that both MP4 and metadata files exist at distinct paths.
+The IPC smoke test lets the C++ client automatically launch the Rust service and verifies a real C++/Rust round trip through the Windows Named Pipe, including protocol negotiation, registration, camera enumeration, configuration, transport delivery, and acknowledgement. When a camera is available, it also records and finalizes two consecutive takes through one prepared capture pipeline, verifies distinct MP4 and metadata paths, validates the DAW-to-first-frame synchronization offset, and requires at least one frame to be recovered from the Arm-time ring buffer.
 
 This environment supplied duplicate `Path` and `PATH` variables. They were normalized in the CMake process before invoking MSBuild; this is an execution-environment workaround, not a project requirement.

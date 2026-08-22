@@ -13,6 +13,8 @@ use thiserror::Error;
 pub struct CaptureStats {
     pub frame_count: u64,
     pub dropped_frame_count: u64,
+    pub buffered_frame_count: u64,
+    pub first_frame_monotonic_time_ns: Option<i64>,
 }
 
 #[derive(Debug, Error)]
@@ -36,6 +38,8 @@ pub enum CaptureError {
     AlreadyRecording,
     #[error("recording has not started on this prepared capture")]
     NotRecording,
+    #[error("captured frame is too large to store in a Media Foundation buffer")]
+    FrameTooLarge,
     #[cfg(not(windows))]
     #[error("camera capture is currently supported on Windows only")]
     UnsupportedPlatform,
@@ -44,6 +48,7 @@ pub enum CaptureError {
 enum CaptureCommand {
     Begin {
         output_path: PathBuf,
+        logical_start_monotonic_time_ns: i64,
         response: mpsc::SyncSender<Result<(), CaptureError>>,
     },
     End {
@@ -88,11 +93,16 @@ impl CaptureHandle {
         }
     }
 
-    pub fn begin_recording(&self, output_path: PathBuf) -> Result<(), CaptureError> {
+    pub fn begin_recording(
+        &self,
+        output_path: PathBuf,
+        logical_start_monotonic_time_ns: i64,
+    ) -> Result<(), CaptureError> {
         let (response_sender, response_receiver) = mpsc::sync_channel(1);
         self.commands
             .send(CaptureCommand::Begin {
                 output_path,
+                logical_start_monotonic_time_ns,
                 response: response_sender,
             })
             .map_err(|_| CaptureError::CommandDisconnected("starting recording"))?;
@@ -154,25 +164,28 @@ mod platform {
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod platform {
-    use std::sync::mpsc::TryRecvError;
+    use std::{collections::VecDeque, sync::mpsc::TryRecvError};
 
     use windows::{
         Win32::{
             Foundation::RPC_E_CHANGED_MODE,
             Media::MediaFoundation::{
-                IMFAttributes, IMFByteStream, IMFMediaSource, IMFSinkWriter,
+                IMFAttributes, IMFByteStream, IMFMediaSource, IMFSample, IMFSinkWriter,
                 MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
                 MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, MF_MT_AVG_BITRATE,
                 MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
                 MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
                 MF_SOURCE_READERF_ENDOFSTREAM, MF_VERSION, MFCreateAttributes,
-                MFCreateDeviceSource, MFCreateMediaType, MFCreateSinkWriterFromURL,
-                MFCreateSourceReaderFromMediaSource, MFMediaType_Video, MFSTARTUP_FULL, MFShutdown,
-                MFStartup, MFVideoFormat_H264, MFVideoFormat_I420, MFVideoFormat_IYUV,
-                MFVideoFormat_NV12, MFVideoFormat_YUY2, MFVideoFormat_YV12,
+                MFCreateDeviceSource, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
+                MFCreateSinkWriterFromURL, MFCreateSourceReaderFromMediaSource, MFMediaType_Video,
+                MFSTARTUP_FULL, MFShutdown, MFStartup, MFVideoFormat_H264, MFVideoFormat_I420,
+                MFVideoFormat_IYUV, MFVideoFormat_NV12, MFVideoFormat_YUY2, MFVideoFormat_YV12,
                 MFVideoInterlace_Progressive,
             },
-            System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize},
+            System::{
+                Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize},
+                Performance::{QueryPerformanceCounter, QueryPerformanceFrequency},
+            },
         },
         core::{Error as WindowsError, HSTRING},
     };
@@ -181,6 +194,9 @@ mod platform {
 
     const VIDEO_STREAM: u32 =
         u32::from_ne_bytes(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0.to_ne_bytes());
+    const PRE_ROLL_DURATION_NS: i64 = 2_000_000_000;
+    const MAX_PRE_ROLL_FRAMES: usize = 90;
+    const CLOCK_CORRELATION_TOLERANCE_NS: i64 = 10_000_000_000;
 
     struct PlatformGuard {
         uninitialize_com: bool,
@@ -360,6 +376,35 @@ mod platform {
         stats: CaptureStats,
     }
 
+    struct BufferedFrame {
+        bytes: Vec<u8>,
+        source_timestamp: i64,
+        monotonic_time_ns: i64,
+        duration: Option<i64>,
+        flags: Option<u32>,
+    }
+
+    struct QpcClock {
+        frequency: i64,
+    }
+
+    impl QpcClock {
+        fn initialize() -> Result<Self, CaptureError> {
+            let mut frequency = 0_i64;
+            // SAFETY: The output pointer is valid for the duration of the call.
+            unsafe { QueryPerformanceFrequency(&raw mut frequency) }?;
+            Ok(Self { frequency })
+        }
+
+        fn now_ns(&self) -> Result<i64, CaptureError> {
+            let mut counter = 0_i64;
+            // SAFETY: The output pointer is valid for the duration of the call.
+            unsafe { QueryPerformanceCounter(&raw mut counter) }?;
+            let nanoseconds = i128::from(counter) * 1_000_000_000 / i128::from(self.frequency);
+            Ok(i64::try_from(nanoseconds).unwrap_or(i64::MAX))
+        }
+    }
+
     fn create_writer(
         output_path: &Path,
         input_type: &windows::Win32::Media::MediaFoundation::IMFMediaType,
@@ -384,6 +429,132 @@ mod platform {
             first_timestamp: None,
             stats: CaptureStats::default(),
         })
+    }
+
+    fn submit_sample(
+        active: &mut ActiveWriter,
+        sample: &IMFSample,
+        source_timestamp: i64,
+        monotonic_time_ns: i64,
+        from_buffer: bool,
+    ) -> Result<(), CaptureError> {
+        let origin = *active.first_timestamp.get_or_insert(source_timestamp);
+        active
+            .stats
+            .first_frame_monotonic_time_ns
+            .get_or_insert(monotonic_time_ns);
+        // SAFETY: The sample belongs to this thread. Sink Writer timestamps start at zero.
+        unsafe {
+            sample.SetSampleTime(source_timestamp.saturating_sub(origin))?;
+            active.writer.WriteSample(active.stream, sample)?;
+        }
+        active.stats.frame_count += 1;
+        if from_buffer {
+            active.stats.buffered_frame_count += 1;
+        }
+        Ok(())
+    }
+
+    fn copy_buffered_frame(
+        sample: &IMFSample,
+        source_timestamp: i64,
+        monotonic_time_ns: i64,
+    ) -> Result<BufferedFrame, CaptureError> {
+        // SAFETY: The returned contiguous buffer remains locked only while its bytes are copied.
+        let buffer = unsafe { sample.ConvertToContiguousBuffer() }?;
+        let mut data = std::ptr::null_mut();
+        let mut current_length = 0_u32;
+        unsafe { buffer.Lock(&raw mut data, None, Some(&raw mut current_length)) }?;
+        let bytes = if current_length == 0 {
+            Vec::new()
+        } else {
+            // SAFETY: Lock returned a buffer containing current_length readable bytes.
+            unsafe {
+                std::slice::from_raw_parts(
+                    data.cast_const(),
+                    usize::try_from(current_length).expect("u32 always fits in usize on Windows"),
+                )
+            }
+            .to_vec()
+        };
+        // SAFETY: This balances the successful Lock call above.
+        unsafe { buffer.Unlock() }?;
+        Ok(BufferedFrame {
+            bytes,
+            source_timestamp,
+            monotonic_time_ns,
+            // SAFETY: These getters only read optional attributes from this sample.
+            duration: unsafe { sample.GetSampleDuration() }.ok(),
+            flags: unsafe { sample.GetSampleFlags() }.ok(),
+        })
+    }
+
+    fn write_buffered_frame(
+        active: &mut ActiveWriter,
+        frame: &BufferedFrame,
+    ) -> Result<(), CaptureError> {
+        let length = u32::try_from(frame.bytes.len()).map_err(|_| CaptureError::FrameTooLarge)?;
+        // SAFETY: Both factories return independent objects owned by this function.
+        let sample = unsafe { MFCreateSample() }?;
+        let buffer = unsafe { MFCreateMemoryBuffer(length) }?;
+        let mut destination = std::ptr::null_mut();
+        unsafe { buffer.Lock(&raw mut destination, None, None) }?;
+        if !frame.bytes.is_empty() {
+            // SAFETY: The destination buffer was allocated with exactly frame.bytes.len() bytes.
+            unsafe {
+                std::ptr::copy_nonoverlapping(frame.bytes.as_ptr(), destination, frame.bytes.len());
+            }
+        }
+        // SAFETY: This balances Lock; length cannot exceed the allocated buffer size.
+        unsafe {
+            buffer.Unlock()?;
+            buffer.SetCurrentLength(length)?;
+            sample.AddBuffer(&buffer)?;
+            if let Some(duration) = frame.duration {
+                sample.SetSampleDuration(duration)?;
+            }
+            if let Some(flags) = frame.flags {
+                sample.SetSampleFlags(flags)?;
+            }
+        }
+        submit_sample(
+            active,
+            &sample,
+            frame.source_timestamp,
+            frame.monotonic_time_ns,
+            true,
+        )
+    }
+
+    fn begin_writer(
+        output_path: &Path,
+        input_type: &windows::Win32::Media::MediaFoundation::IMFMediaType,
+        format: FormatInfo,
+        logical_start_monotonic_time_ns: i64,
+        buffered_frames: &mut VecDeque<BufferedFrame>,
+    ) -> Result<ActiveWriter, CaptureError> {
+        let mut active = create_writer(output_path, input_type, format)?;
+        let clock_is_correlated = buffered_frames.back().is_some_and(|frame| {
+            frame
+                .monotonic_time_ns
+                .abs_diff(logical_start_monotonic_time_ns)
+                <= u64::try_from(CLOCK_CORRELATION_TOLERANCE_NS)
+                    .expect("clock tolerance is positive")
+        });
+        if clock_is_correlated {
+            while buffered_frames
+                .front()
+                .is_some_and(|frame| frame.monotonic_time_ns < logical_start_monotonic_time_ns)
+            {
+                buffered_frames.pop_front();
+            }
+            while let Some(frame) = buffered_frames.pop_front() {
+                write_buffered_frame(&mut active, &frame)?;
+            }
+        } else {
+            buffered_frames.clear();
+        }
+        Ok(active)
     }
 
     fn finalize_writer(active: &ActiveWriter) -> Result<CaptureStats, CaptureError> {
@@ -415,10 +586,11 @@ mod platform {
             let (input_type, format) = choose_input_type(&reader)?;
             // SAFETY: The selected native type came from this reader and reserved must be null.
             unsafe { reader.SetCurrentMediaType(VIDEO_STREAM, None, &input_type) }?;
-            Ok((platform, source, reader, input_type, format))
+            let clock = QpcClock::initialize()?;
+            Ok((platform, source, reader, input_type, format, clock))
         })();
 
-        let (platform, source, reader, input_type, format) = match initialized {
+        let (platform, source, reader, input_type, format, clock) = match initialized {
             Ok(state) => {
                 tracing::info!(source_id, "capture pipeline prepared");
                 let _ = ready.send(Ok(()));
@@ -431,19 +603,30 @@ mod platform {
         };
 
         let mut active_writer: Option<ActiveWriter> = None;
+        let mut buffered_frames = VecDeque::new();
+        let mut clock_anchor: Option<(i64, i64)> = None;
         'capture: loop {
             loop {
                 match commands.try_recv() {
                     Ok(CaptureCommand::Begin {
                         output_path,
+                        logical_start_monotonic_time_ns,
                         response,
                     }) => {
                         let result = if active_writer.is_some() {
                             Err(CaptureError::AlreadyRecording)
                         } else {
-                            create_writer(&output_path, &input_type, format).map(|writer| {
+                            begin_writer(
+                                &output_path,
+                                &input_type,
+                                format,
+                                logical_start_monotonic_time_ns,
+                                &mut buffered_frames,
+                            )
+                            .map(|writer| {
                                 tracing::info!(
                                     path = %output_path.display(),
+                                    buffered_frames = writer.stats.buffered_frame_count,
                                     "prepared capture started recording"
                                 );
                                 active_writer = Some(writer);
@@ -482,23 +665,38 @@ mod platform {
                     Some(&raw mut sample),
                 )?;
             }
+            let arrival_monotonic_time_ns = clock.now_ns()?;
             if flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
                 break;
             }
-            let Some(active) = active_writer.as_mut() else {
-                continue;
-            };
             let Some(sample) = sample else {
-                active.stats.dropped_frame_count += 1;
+                if let Some(active) = active_writer.as_mut() {
+                    active.stats.dropped_frame_count += 1;
+                }
                 continue;
             };
-            let origin = *active.first_timestamp.get_or_insert(timestamp);
-            // SAFETY: The sample belongs to this thread. Sink Writer timestamps start at zero.
-            unsafe {
-                sample.SetSampleTime(timestamp.saturating_sub(origin))?;
-                active.writer.WriteSample(active.stream, &sample)?;
+            let (source_anchor, monotonic_anchor) =
+                *clock_anchor.get_or_insert((timestamp, arrival_monotonic_time_ns));
+            let source_delta_ns = timestamp.saturating_sub(source_anchor).saturating_mul(100);
+            let frame_monotonic_time_ns = monotonic_anchor.saturating_add(source_delta_ns);
+            if let Some(active) = active_writer.as_mut() {
+                submit_sample(active, &sample, timestamp, frame_monotonic_time_ns, false)?;
+            } else {
+                let frame = copy_buffered_frame(&sample, timestamp, frame_monotonic_time_ns)?;
+                buffered_frames.push_back(frame);
+                while buffered_frames.len() > MAX_PRE_ROLL_FRAMES
+                    || buffered_frames.front().is_some_and(|oldest| {
+                        buffered_frames.back().is_some_and(|newest| {
+                            newest
+                                .monotonic_time_ns
+                                .saturating_sub(oldest.monotonic_time_ns)
+                                > PRE_ROLL_DURATION_NS
+                        })
+                    })
+                {
+                    buffered_frames.pop_front();
+                }
             }
-            active.stats.frame_count += 1;
         }
 
         if let Some(writer) = active_writer.take() {

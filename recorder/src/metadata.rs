@@ -23,9 +23,13 @@ pub struct TakeMetadata {
     pub sample_rate: f64,
     pub start_host_time_ns: Option<i64>,
     pub start_monotonic_time_ns: i64,
+    #[serde(default)]
+    pub first_frame_monotonic_time_ns: Option<i64>,
     pub sync_offset_ns: i64,
     pub frame_count: u64,
     pub dropped_frame_count: u64,
+    #[serde(default)]
+    pub buffered_frame_count: u64,
     pub warnings: Vec<String>,
     pub finalization_status: String,
 }
@@ -69,9 +73,11 @@ mod tests {
             sample_rate: 48_000.0,
             start_host_time_ns: None,
             start_monotonic_time_ns: 10,
+            first_frame_monotonic_time_ns: Some(12),
             sync_offset_ns: 0,
             frame_count: 1_800,
             dropped_frame_count: 0,
+            buffered_frame_count: 2,
             warnings: Vec::new(),
             finalization_status: "complete".into(),
         };
@@ -79,5 +85,36 @@ mod tests {
         write_json(&path, &metadata).unwrap();
         let restored: TakeMetadata = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         assert_eq!(restored, metadata);
+    }
+
+    #[test]
+    fn newly_added_timing_fields_default_when_reading_older_metadata() {
+        let value = serde_json::json!({
+            "schema_version": 1,
+            "take_id": "take-1",
+            "session_id": "session-1",
+            "persistent_instance_id": "persistent",
+            "runtime_instance_id": "runtime",
+            "instance_label": "Camera",
+            "source_id": "camera-1",
+            "source_display_name": "Camera 1",
+            "encoding_profile": "native-to-h264",
+            "output_video_path": "take.mp4",
+            "record_started_at": "2026-08-22T00:00:00Z",
+            "record_stopped_at": "2026-08-22T00:01:00Z",
+            "start_project_sample": 0,
+            "end_project_sample": 2_880_000,
+            "sample_rate": 48_000.0,
+            "start_host_time_ns": null,
+            "start_monotonic_time_ns": 10,
+            "sync_offset_ns": 0,
+            "frame_count": 1_800,
+            "dropped_frame_count": 0,
+            "warnings": [],
+            "finalization_status": "complete"
+        });
+        let restored: TakeMetadata = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.first_frame_monotonic_time_ns, None);
+        assert_eq!(restored.buffered_frame_count, 0);
     }
 }

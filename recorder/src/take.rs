@@ -137,7 +137,10 @@ impl TakeCoordinator {
         let partial_video_path = take_directory.join(format!("{base_name}.partial.mp4"));
         let video_path = take_directory.join(format!("{base_name}.mp4"));
         let metadata_path = take_directory.join(format!("{base_name}.sync.json"));
-        if let Err(error) = prepared.capture.begin_recording(partial_video_path.clone()) {
+        if let Err(error) = prepared.capture.begin_recording(
+            partial_video_path.clone(),
+            snapshot.callback_monotonic_time_ns,
+        ) {
             let _ = fs::remove_dir(&take_directory);
             return Err(error.into());
         }
@@ -194,6 +197,19 @@ impl TakeCoordinator {
         }
         fs::rename(&active.partial_video_path, &active.video_path)?;
 
+        let sync_offset_ns = stats
+            .first_frame_monotonic_time_ns
+            .map_or(0, |first_frame| {
+                first_frame.saturating_sub(active.start_snapshot.callback_monotonic_time_ns)
+            });
+        let warnings = if stats.first_frame_monotonic_time_ns.is_some() {
+            vec![
+                "camera timestamps are correlated at frame delivery; camera sensor latency is not calibrated"
+                    .into(),
+            ]
+        } else {
+            vec!["no captured frame was available for DAW clock correlation".into()]
+        };
         let metadata = TakeMetadata {
             schema_version: 1,
             take_id: active.take_id.clone(),
@@ -212,13 +228,12 @@ impl TakeCoordinator {
             sample_rate: active.start_snapshot.sample_rate,
             start_host_time_ns: active.start_snapshot.host_time_ns,
             start_monotonic_time_ns: active.start_snapshot.callback_monotonic_time_ns,
-            sync_offset_ns: 0,
+            first_frame_monotonic_time_ns: stats.first_frame_monotonic_time_ns,
+            sync_offset_ns,
             frame_count: stats.frame_count,
             dropped_frame_count: stats.dropped_frame_count,
-            warnings: vec![
-                "camera-to-DAW timestamp calibration is not yet available; sync_offset_ns is uncalibrated"
-                    .into(),
-            ],
+            buffered_frame_count: stats.buffered_frame_count,
+            warnings,
             finalization_status: "complete".into(),
         };
         write_json(&active.metadata_path, &metadata)?;
