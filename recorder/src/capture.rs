@@ -50,13 +50,19 @@ pub enum CaptureError {
 
 enum CaptureCommand {
     Begin {
+        recording_id: String,
         output_path: PathBuf,
         logical_start_monotonic_time_ns: i64,
         response: mpsc::SyncSender<Result<(), CaptureError>>,
     },
     End {
+        recording_id: String,
         logical_stop_monotonic_time_ns: i64,
         response: mpsc::SyncSender<Result<CaptureStats, CaptureError>>,
+    },
+    Abort {
+        recording_id: String,
+        response: mpsc::SyncSender<Result<(), CaptureError>>,
     },
     Shutdown,
 }
@@ -99,12 +105,14 @@ impl CaptureHandle {
 
     pub fn begin_recording(
         &self,
+        recording_id: String,
         output_path: PathBuf,
         logical_start_monotonic_time_ns: i64,
     ) -> Result<(), CaptureError> {
         let (response_sender, response_receiver) = mpsc::sync_channel(1);
         self.commands
             .send(CaptureCommand::Begin {
+                recording_id,
                 output_path,
                 logical_start_monotonic_time_ns,
                 response: response_sender,
@@ -124,11 +132,13 @@ impl CaptureHandle {
 
     pub fn end_recording(
         &self,
+        recording_id: String,
         logical_stop_monotonic_time_ns: i64,
     ) -> Result<CaptureStats, CaptureError> {
         let (response_sender, response_receiver) = mpsc::sync_channel(1);
         self.commands
             .send(CaptureCommand::End {
+                recording_id,
                 logical_stop_monotonic_time_ns,
                 response: response_sender,
             })
@@ -141,6 +151,26 @@ impl CaptureHandle {
                 }
                 mpsc::RecvTimeoutError::Disconnected => {
                     CaptureError::CommandDisconnected("stopping recording")
+                }
+            })?
+    }
+
+    pub fn abort_recording(&self, recording_id: String) -> Result<(), CaptureError> {
+        let (response_sender, response_receiver) = mpsc::sync_channel(1);
+        self.commands
+            .send(CaptureCommand::Abort {
+                recording_id,
+                response: response_sender,
+            })
+            .map_err(|_| CaptureError::CommandDisconnected("aborting recording"))?;
+        response_receiver
+            .recv_timeout(Duration::from_secs(15))
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout => {
+                    CaptureError::CommandTimeout("aborting recording")
+                }
+                mpsc::RecvTimeoutError::Disconnected => {
+                    CaptureError::CommandDisconnected("aborting recording")
                 }
             })?
     }
@@ -172,7 +202,10 @@ mod platform {
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod platform {
-    use std::{collections::VecDeque, sync::mpsc::TryRecvError};
+    use std::{
+        collections::{HashMap, VecDeque},
+        sync::{Arc, mpsc::TryRecvError},
+    };
 
     use windows::{
         Win32::{
@@ -383,16 +416,21 @@ mod platform {
         writer: IMFSinkWriter,
         stream: u32,
         first_timestamp: Option<i64>,
-        pending_frames: VecDeque<BufferedFrame>,
+        pending_frames: VecDeque<PendingFrame>,
         stats: CaptureStats,
     }
 
+    #[derive(Clone)]
     struct BufferedFrame {
-        bytes: Vec<u8>,
+        bytes: Arc<[u8]>,
         source_timestamp: i64,
         monotonic_time_ns: i64,
         duration: Option<i64>,
         flags: Option<u32>,
+    }
+
+    struct PendingFrame {
+        frame: BufferedFrame,
         from_arm_buffer: bool,
     }
 
@@ -473,15 +511,14 @@ mod platform {
         sample: &IMFSample,
         source_timestamp: i64,
         monotonic_time_ns: i64,
-        from_arm_buffer: bool,
     ) -> Result<BufferedFrame, CaptureError> {
         // SAFETY: The returned contiguous buffer remains locked only while its bytes are copied.
         let buffer = unsafe { sample.ConvertToContiguousBuffer() }?;
         let mut data = std::ptr::null_mut();
         let mut current_length = 0_u32;
         unsafe { buffer.Lock(&raw mut data, None, Some(&raw mut current_length)) }?;
-        let bytes = if current_length == 0 {
-            Vec::new()
+        let bytes: Arc<[u8]> = if current_length == 0 {
+            Arc::from([])
         } else {
             // SAFETY: Lock returned a buffer containing current_length readable bytes.
             unsafe {
@@ -490,7 +527,7 @@ mod platform {
                     usize::try_from(current_length).expect("u32 always fits in usize on Windows"),
                 )
             }
-            .to_vec()
+            .into()
         };
         // SAFETY: This balances the successful Lock call above.
         unsafe { buffer.Unlock() }?;
@@ -501,14 +538,14 @@ mod platform {
             // SAFETY: These getters only read optional attributes from this sample.
             duration: unsafe { sample.GetSampleDuration() }.ok(),
             flags: unsafe { sample.GetSampleFlags() }.ok(),
-            from_arm_buffer,
         })
     }
 
     fn write_buffered_frame(
         active: &mut ActiveWriter,
-        frame: &BufferedFrame,
+        pending: &PendingFrame,
     ) -> Result<(), CaptureError> {
+        let frame = &pending.frame;
         let length = u32::try_from(frame.bytes.len()).map_err(|_| CaptureError::FrameTooLarge)?;
         // SAFETY: Both factories return independent objects owned by this function.
         let sample = unsafe { MFCreateSample() }?;
@@ -538,7 +575,7 @@ mod platform {
             &sample,
             frame.source_timestamp,
             frame.monotonic_time_ns,
-            frame.from_arm_buffer,
+            pending.from_arm_buffer,
         )
     }
 
@@ -547,7 +584,7 @@ mod platform {
         input_type: &windows::Win32::Media::MediaFoundation::IMFMediaType,
         format: FormatInfo,
         logical_start_monotonic_time_ns: i64,
-        buffered_frames: &mut VecDeque<BufferedFrame>,
+        buffered_frames: &VecDeque<BufferedFrame>,
     ) -> Result<ActiveWriter, CaptureError> {
         let mut active = create_writer(output_path, input_type, format)?;
         let clock_is_correlated = buffered_frames.back().is_some_and(|frame| {
@@ -558,15 +595,16 @@ mod platform {
                     .expect("clock tolerance is positive")
         });
         if clock_is_correlated {
-            while buffered_frames
-                .front()
-                .is_some_and(|frame| frame.monotonic_time_ns < logical_start_monotonic_time_ns)
-            {
-                buffered_frames.pop_front();
-            }
-            active.pending_frames.append(buffered_frames);
-        } else {
-            buffered_frames.clear();
+            active.pending_frames.extend(
+                buffered_frames
+                    .iter()
+                    .filter(|frame| frame.monotonic_time_ns >= logical_start_monotonic_time_ns)
+                    .cloned()
+                    .map(|frame| PendingFrame {
+                        frame,
+                        from_arm_buffer: true,
+                    }),
+            );
         }
         Ok(active)
     }
@@ -577,8 +615,9 @@ mod platform {
                 || active.pending_frames.front().is_some_and(|oldest| {
                     active.pending_frames.back().is_some_and(|newest| {
                         newest
+                            .frame
                             .monotonic_time_ns
-                            .saturating_sub(oldest.monotonic_time_ns)
+                            .saturating_sub(oldest.frame.monotonic_time_ns)
                             > OUTPUT_HOLDBACK_DURATION_NS
                     })
                 });
@@ -605,7 +644,7 @@ mod platform {
             while active
                 .pending_frames
                 .front()
-                .is_some_and(|frame| frame.monotonic_time_ns <= logical_stop)
+                .is_some_and(|pending| pending.frame.monotonic_time_ns <= logical_stop)
             {
                 let frame = active
                     .pending_frames
@@ -666,26 +705,30 @@ mod platform {
             }
         };
 
-        let mut active_writer: Option<ActiveWriter> = None;
+        let mut active_writers: HashMap<String, ActiveWriter> = HashMap::new();
+        let mut failed_writers: HashMap<String, CaptureError> = HashMap::new();
         let mut buffered_frames = VecDeque::new();
         let mut clock_anchor: Option<(i64, i64)> = None;
         'capture: loop {
             loop {
                 match commands.try_recv() {
                     Ok(CaptureCommand::Begin {
+                        recording_id,
                         output_path,
                         logical_start_monotonic_time_ns,
                         response,
                     }) => {
-                        let result = if active_writer.is_some() {
-                            Err(CaptureError::AlreadyRecording)
-                        } else {
-                            begin_writer(
+                        failed_writers.remove(&recording_id);
+                        let result = match active_writers.entry(recording_id) {
+                            std::collections::hash_map::Entry::Occupied(_) => {
+                                Err(CaptureError::AlreadyRecording)
+                            }
+                            std::collections::hash_map::Entry::Vacant(entry) => begin_writer(
                                 &output_path,
                                 &input_type,
                                 format,
                                 logical_start_monotonic_time_ns,
-                                &mut buffered_frames,
+                                &buffered_frames,
                             )
                             .map(|writer| {
                                 tracing::info!(
@@ -693,27 +736,40 @@ mod platform {
                                     buffered_frames = writer.pending_frames.len(),
                                     "prepared capture started recording"
                                 );
-                                active_writer = Some(writer);
-                            })
+                                entry.insert(writer);
+                            }),
                         };
                         let _ = response.send(result);
                     }
                     Ok(CaptureCommand::End {
+                        recording_id,
                         logical_stop_monotonic_time_ns,
                         response,
                     }) => {
-                        let result = active_writer
-                            .take()
-                            .ok_or(CaptureError::NotRecording)
-                            .and_then(|writer| {
-                                finalize_writer(writer, Some(logical_stop_monotonic_time_ns))
-                            });
+                        let result = if let Some(writer) = active_writers.remove(&recording_id) {
+                            finalize_writer(writer, Some(logical_stop_monotonic_time_ns))
+                        } else if let Some(error) = failed_writers.remove(&recording_id) {
+                            Err(error)
+                        } else {
+                            Err(CaptureError::NotRecording)
+                        };
+                        let _ = response.send(result);
+                    }
+                    Ok(CaptureCommand::Abort {
+                        recording_id,
+                        response,
+                    }) => {
+                        let result = active_writers
+                            .remove(&recording_id)
+                            .map_or(Ok(()), |writer| finalize_writer(writer, None).map(drop));
+                        failed_writers.remove(&recording_id);
                         let _ = response.send(result);
                     }
                     Ok(CaptureCommand::Shutdown) | Err(TryRecvError::Disconnected) => {
-                        if let Some(writer) = active_writer.take() {
+                        for (_, writer) in active_writers.drain() {
                             let _ = finalize_writer(writer, None);
                         }
+                        failed_writers.clear();
                         break 'capture;
                     }
                     Err(TryRecvError::Empty) => break,
@@ -739,7 +795,7 @@ mod platform {
                 break;
             }
             let Some(sample) = sample else {
-                if let Some(active) = active_writer.as_mut() {
+                for active in active_writers.values_mut() {
                     active.stats.dropped_frame_count += 1;
                 }
                 continue;
@@ -748,30 +804,41 @@ mod platform {
                 *clock_anchor.get_or_insert((timestamp, arrival_monotonic_time_ns));
             let source_delta_ns = timestamp.saturating_sub(source_anchor).saturating_mul(100);
             let frame_monotonic_time_ns = monotonic_anchor.saturating_add(source_delta_ns);
-            if let Some(active) = active_writer.as_mut() {
-                let frame =
-                    copy_buffered_frame(&sample, timestamp, frame_monotonic_time_ns, false)?;
-                active.pending_frames.push_back(frame);
-                flush_aged_frames(active)?;
-            } else {
-                let frame = copy_buffered_frame(&sample, timestamp, frame_monotonic_time_ns, true)?;
-                buffered_frames.push_back(frame);
-                while buffered_frames.len() > MAX_PRE_ROLL_FRAMES
-                    || buffered_frames.front().is_some_and(|oldest| {
-                        buffered_frames.back().is_some_and(|newest| {
-                            newest
-                                .monotonic_time_ns
-                                .saturating_sub(oldest.monotonic_time_ns)
-                                > PRE_ROLL_DURATION_NS
-                        })
+            let frame = copy_buffered_frame(&sample, timestamp, frame_monotonic_time_ns)?;
+            buffered_frames.push_back(frame.clone());
+            while buffered_frames.len() > MAX_PRE_ROLL_FRAMES
+                || buffered_frames.front().is_some_and(|oldest| {
+                    buffered_frames.back().is_some_and(|newest| {
+                        newest
+                            .monotonic_time_ns
+                            .saturating_sub(oldest.monotonic_time_ns)
+                            > PRE_ROLL_DURATION_NS
                     })
-                {
-                    buffered_frames.pop_front();
+                })
+            {
+                buffered_frames.pop_front();
+            }
+            let recording_ids: Vec<_> = active_writers.keys().cloned().collect();
+            for recording_id in recording_ids {
+                let result = {
+                    let active = active_writers
+                        .get_mut(&recording_id)
+                        .expect("recording ID came from the active writer map");
+                    active.pending_frames.push_back(PendingFrame {
+                        frame: frame.clone(),
+                        from_arm_buffer: false,
+                    });
+                    flush_aged_frames(active)
+                };
+                if let Err(error) = result {
+                    active_writers.remove(&recording_id);
+                    tracing::warn!(%recording_id, %error, "isolated recording writer failure");
+                    failed_writers.insert(recording_id, error);
                 }
             }
         }
 
-        if let Some(writer) = active_writer.take() {
+        for (_, writer) in active_writers.drain() {
             let _ = finalize_writer(writer, None);
         }
         drop(reader);

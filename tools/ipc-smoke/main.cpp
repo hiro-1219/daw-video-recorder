@@ -28,10 +28,19 @@ int main()
     }
 
     dawvr::SpscQueue<dawvr::TransportSnapshot, 2048U> queue;
+    dawvr::SpscQueue<dawvr::TransportSnapshot, 2048U> sharedQueue;
     std::atomic<bool> armed{};
+    std::atomic<bool> sharedArmed{};
     dawvr::ServiceClient client(queue, armed);
+    dawvr::ServiceClient sharedClient(sharedQueue, sharedArmed);
     client.setIdentity("ipc-smoke-test", "IPC Smoke Test");
+    sharedClient.setIdentity("ipc-smoke-shared-test", "IPC Shared Camera Test");
     client.setProjectRoot(testProjectRoot.getFullPathName());
+    sharedClient.setProjectRoot(testProjectRoot.getFullPathName());
+    const auto stopClients = [&client, &sharedClient] {
+        client.stop();
+        sharedClient.stop();
+    };
     client.start();
 
     const auto connectionDeadline = juce::Time::getMillisecondCounter() + 5000U;
@@ -42,7 +51,7 @@ int main()
     if (client.connectionState() != dawvr::ServiceConnectionState::connected)
     {
         std::cerr << "Connection failed: " << client.statusText() << '\n';
-        client.stop();
+        stopClients();
         return 1;
     }
 
@@ -54,7 +63,7 @@ int main()
     if (client.sourceListRevision() == 0U)
     {
         std::cerr << "Camera source list was not received\n";
-        client.stop();
+        stopClients();
         return 4;
     }
 
@@ -62,9 +71,34 @@ int main()
     const auto exerciseCapture = !sources.empty();
     if (exerciseCapture)
     {
-        client.setSelectedSource(juce::String::fromUTF8(sources.front().sourceId.c_str()));
+        sharedClient.start();
+        const auto sharedConnectionDeadline = juce::Time::getMillisecondCounter() + 5000U;
+        while (sharedClient.connectionState() != dawvr::ServiceConnectionState::connected
+               && juce::Time::getMillisecondCounter() < sharedConnectionDeadline)
+            juce::Thread::sleep(20);
+        if (sharedClient.connectionState() != dawvr::ServiceConnectionState::connected)
+        {
+            std::cerr << "Shared client connection failed: " << sharedClient.statusText() << '\n';
+            stopClients();
+            return 18;
+        }
+        const auto sharedSourceDeadline = juce::Time::getMillisecondCounter() + 5000U;
+        while (sharedClient.sourceListRevision() == 0U
+               && juce::Time::getMillisecondCounter() < sharedSourceDeadline)
+            juce::Thread::sleep(20);
+        if (sharedClient.sourceListRevision() == 0U)
+        {
+            std::cerr << "Shared client camera source list was not received\n";
+            stopClients();
+            return 19;
+        }
+
+        const auto selectedSource = juce::String::fromUTF8(sources.front().sourceId.c_str());
+        client.setSelectedSource(selectedSource);
+        sharedClient.setSelectedSource(selectedSource);
         armed.store(true, std::memory_order_release);
-        juce::Thread::sleep(500);
+        sharedArmed.store(true, std::memory_order_release);
+        juce::Thread::sleep(1000);
     }
 
     dawvr::TransportSnapshot startSnapshot;
@@ -81,16 +115,31 @@ int main()
     if (!queue.push(startSnapshot))
     {
         std::cerr << "Queue unexpectedly full\n";
-        client.stop();
+        stopClients();
         return 2;
+    }
+    if (exerciseCapture && !sharedQueue.push(startSnapshot))
+    {
+        std::cerr << "Shared client queue unexpectedly full\n";
+        stopClients();
+        return 20;
     }
 
     const auto sendDeadline = juce::Time::getMillisecondCounter() + 5000U;
-    while (client.sentSnapshotCount() == 0U
+    while ((client.sentSnapshotCount() == 0U
+            || (exerciseCapture && sharedClient.sentSnapshotCount() == 0U))
            && juce::Time::getMillisecondCounter() < sendDeadline)
         juce::Thread::sleep(20);
+    if (client.sentSnapshotCount() == 0U
+        || (exerciseCapture && sharedClient.sentSnapshotCount() == 0U))
+    {
+        std::cerr << "Concurrent recording starts were not acknowledged\n";
+        stopClients();
+        return 21;
+    }
 
     dawvr::FinalizedTakeInfo firstFinalizedTake;
+    dawvr::FinalizedTakeInfo sharedFinalizedTake;
     std::uint32_t preparedStartAcknowledgementMs{};
     if (exerciseCapture)
     {
@@ -103,32 +152,42 @@ int main()
         if (!queue.push(stopSnapshot))
         {
             std::cerr << "Queue unexpectedly full while stopping\n";
-            client.stop();
+            stopClients();
             return 6;
+        }
+        if (!sharedQueue.push(stopSnapshot))
+        {
+            std::cerr << "Shared client queue unexpectedly full while stopping\n";
+            stopClients();
+            return 22;
         }
 
         const auto finalizationDeadline = juce::Time::getMillisecondCounter() + 15000U;
-        while (client.latestFinalizedTake().revision == 0U
+        while ((client.latestFinalizedTake().revision == 0U
+                || sharedClient.latestFinalizedTake().revision == 0U)
                && juce::Time::getMillisecondCounter() < finalizationDeadline)
             juce::Thread::sleep(20);
-        if (client.latestFinalizedTake().revision == 0U)
+        if (client.latestFinalizedTake().revision == 0U
+            || sharedClient.latestFinalizedTake().revision == 0U)
         {
-            std::cerr << "Recording was not finalized: " << client.statusText() << '\n';
-            client.stop();
+            std::cerr << "Concurrent recordings were not finalized: " << client.statusText()
+                      << " / " << sharedClient.statusText() << '\n';
+            stopClients();
             return 7;
         }
         firstFinalizedTake = client.latestFinalizedTake();
+        sharedFinalizedTake = sharedClient.latestFinalizedTake();
 
         const auto firstStopAcknowledgementDeadline =
             juce::Time::getMillisecondCounter() + 10000U;
-        while (client.sentSnapshotCount() < 2U
+        while ((client.sentSnapshotCount() < 2U || sharedClient.sentSnapshotCount() < 2U)
                && juce::Time::getMillisecondCounter() < firstStopAcknowledgementDeadline)
             juce::Thread::sleep(20);
-        if (client.sentSnapshotCount() < 2U)
+        if (client.sentSnapshotCount() < 2U || sharedClient.sentSnapshotCount() < 2U)
         {
-            std::cerr << "First recording stop was not acknowledged: " << client.statusText()
-                      << '\n';
-            client.stop();
+            std::cerr << "Concurrent recording stops were not acknowledged: "
+                      << client.statusText() << " / " << sharedClient.statusText() << '\n';
+            stopClients();
             return 16;
         }
 
@@ -140,7 +199,7 @@ int main()
         if (!queue.push(secondStartSnapshot))
         {
             std::cerr << "Queue unexpectedly full during second start\n";
-            client.stop();
+            stopClients();
             return 10;
         }
 
@@ -152,7 +211,7 @@ int main()
         {
             std::cerr << "Prepared capture did not start a second take: " << client.statusText()
                       << '\n';
-            client.stop();
+            stopClients();
             return 11;
         }
         preparedStartAcknowledgementMs =
@@ -167,7 +226,7 @@ int main()
         if (!queue.push(secondStopSnapshot))
         {
             std::cerr << "Queue unexpectedly full during second stop\n";
-            client.stop();
+            stopClients();
             return 12;
         }
 
@@ -178,21 +237,29 @@ int main()
         if (client.latestFinalizedTake().revision <= firstFinalizedTake.revision)
         {
             std::cerr << "Second recording was not finalized: " << client.statusText() << '\n';
-            client.stop();
+            stopClients();
             return 13;
         }
     }
 
     const auto sent = client.sentSnapshotCount();
+    const auto sharedSent = sharedClient.sentSnapshotCount();
     const auto finalizedTake = client.latestFinalizedTake();
     const auto status = client.statusText();
-    client.stop();
+    const auto sharedStatus = sharedClient.statusText();
+    stopClients();
 
     const auto expectedSnapshots = exerciseCapture ? 4U : 1U;
     if (sent != expectedSnapshots)
     {
         std::cerr << "Transport acknowledgement was not received: " << status << '\n';
         return 3;
+    }
+    if (exerciseCapture && sharedSent != 2U)
+    {
+        std::cerr << "Shared transport acknowledgement was not received: " << sharedStatus
+                  << '\n';
+        return 23;
     }
 
     std::cout << "IPC smoke test passed; cameras detected: " << sources.size() << '\n';
@@ -257,15 +324,33 @@ int main()
                       << ", discarded tail frames: " << discardedTailFrames << '\n';
             return true;
         };
-        if (!validateTake(firstFinalizedTake, "First")
-            || !validateTake(finalizedTake, "Second"))
+        if (!validateTake(firstFinalizedTake, "Primary first")
+            || !validateTake(sharedFinalizedTake, "Shared concurrent")
+            || !validateTake(finalizedTake, "Primary second"))
         {
             return 8;
         }
-        if (firstFinalizedTake.videoPath == finalizedTake.videoPath)
+        if (firstFinalizedTake.videoPath == finalizedTake.videoPath
+            || firstFinalizedTake.videoPath == sharedFinalizedTake.videoPath
+            || finalizedTake.videoPath == sharedFinalizedTake.videoPath)
         {
-            std::cerr << "Repeated recording reused the previous output path\n";
+            std::cerr << "Independent recordings reused an output path\n";
             return 14;
+        }
+        const auto timingValue = [](const dawvr::FinalizedTakeInfo& take,
+                                    const char* property) {
+            const auto metadataJson =
+                juce::JSON::parse(juce::File(take.metadataPath).loadFileAsString());
+            return static_cast<juce::int64>(
+                metadataJson.getDynamicObject()->getProperty(property));
+        };
+        if (timingValue(firstFinalizedTake, "first_frame_monotonic_time_ns")
+                != timingValue(sharedFinalizedTake, "first_frame_monotonic_time_ns")
+            || timingValue(firstFinalizedTake, "last_frame_monotonic_time_ns")
+                   != timingValue(sharedFinalizedTake, "last_frame_monotonic_time_ns"))
+        {
+            std::cerr << "Concurrent recordings did not receive the same shared frame range\n";
+            return 24;
         }
         if (totalBufferedFrames == 0U)
         {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs, io,
     path::{Path, PathBuf},
 };
@@ -68,12 +68,18 @@ struct ActiveTake {
 #[derive(Debug)]
 struct PreparedCapture {
     source_id: String,
+}
+
+#[derive(Debug)]
+struct SharedCapture {
     capture: CaptureHandle,
+    users: HashSet<String>,
 }
 
 #[derive(Debug, Default)]
 pub struct TakeCoordinator {
     prepared: HashMap<String, PreparedCapture>,
+    captures: HashMap<String, SharedCapture>,
     active: HashMap<String, ActiveTake>,
 }
 
@@ -90,22 +96,40 @@ impl TakeCoordinator {
             return Ok(());
         }
 
-        self.prepared.remove(runtime_instance_id);
-        let capture = CaptureHandle::prepare(source_id.to_owned())?;
+        self.release_prepared(runtime_instance_id);
+        if !self.captures.contains_key(source_id) {
+            let capture = CaptureHandle::prepare(source_id.to_owned())?;
+            self.captures.insert(
+                source_id.to_owned(),
+                SharedCapture {
+                    capture,
+                    users: HashSet::new(),
+                },
+            );
+        }
+        let shared = self
+            .captures
+            .get_mut(source_id)
+            .expect("the shared capture exists after preparation");
+        shared.users.insert(runtime_instance_id.to_owned());
         self.prepared.insert(
             runtime_instance_id.to_owned(),
             PreparedCapture {
                 source_id: source_id.to_owned(),
-                capture,
             },
         );
-        tracing::info!(runtime_instance_id, source_id, "camera capture prepared");
+        tracing::info!(
+            runtime_instance_id,
+            source_id,
+            users = shared.users.len(),
+            "shared camera capture prepared"
+        );
         Ok(())
     }
 
     pub fn unprepare(&mut self, runtime_instance_id: &str) {
         if !self.active.contains_key(runtime_instance_id) {
-            self.prepared.remove(runtime_instance_id);
+            self.release_prepared(runtime_instance_id);
         }
     }
 
@@ -137,7 +161,13 @@ impl TakeCoordinator {
         let partial_video_path = take_directory.join(format!("{base_name}.partial.mp4"));
         let video_path = take_directory.join(format!("{base_name}.mp4"));
         let metadata_path = take_directory.join(format!("{base_name}.sync.json"));
-        if let Err(error) = prepared.capture.begin_recording(
+        let capture = &self
+            .captures
+            .get(&context.source_id)
+            .ok_or_else(|| TakeError::NotPrepared(context.runtime_instance_id.clone()))?
+            .capture;
+        if let Err(error) = capture.begin_recording(
+            context.runtime_instance_id.clone(),
             partial_video_path.clone(),
             snapshot.callback_monotonic_time_ns,
         ) {
@@ -177,11 +207,14 @@ impl TakeCoordinator {
             .remove(runtime_instance_id)
             .ok_or_else(|| TakeError::NotActive(runtime_instance_id.to_owned()))?;
         let stats = self
-            .prepared
-            .get(runtime_instance_id)
+            .captures
+            .get(&active.context.source_id)
             .ok_or_else(|| TakeError::NotPrepared(runtime_instance_id.to_owned()))?
             .capture
-            .end_recording(stop_snapshot.callback_monotonic_time_ns)?;
+            .end_recording(
+                runtime_instance_id.to_owned(),
+                stop_snapshot.callback_monotonic_time_ns,
+            )?;
         tracing::info!(
             runtime_instance_id,
             take_id = %active.take_id,
@@ -260,8 +293,23 @@ impl TakeCoordinator {
     }
 
     pub fn abort(&mut self, runtime_instance_id: &str) {
-        self.active.remove(runtime_instance_id);
-        self.prepared.remove(runtime_instance_id);
+        let active_source = self
+            .active
+            .remove(runtime_instance_id)
+            .map(|active| active.context.source_id);
+        let source_id = active_source.or_else(|| {
+            self.prepared
+                .get(runtime_instance_id)
+                .map(|prepared| prepared.source_id.clone())
+        });
+        if let Some(source_id) = source_id
+            && let Some(shared) = self.captures.get(&source_id)
+        {
+            let _ = shared
+                .capture
+                .abort_recording(runtime_instance_id.to_owned());
+        }
+        self.release_prepared(runtime_instance_id);
     }
 
     #[must_use]
@@ -272,6 +320,26 @@ impl TakeCoordinator {
     #[must_use]
     pub fn is_prepared(&self, runtime_instance_id: &str) -> bool {
         self.prepared.contains_key(runtime_instance_id)
+    }
+
+    fn release_prepared(&mut self, runtime_instance_id: &str) {
+        let Some(prepared) = self.prepared.remove(runtime_instance_id) else {
+            return;
+        };
+        let remove_capture = self
+            .captures
+            .get_mut(&prepared.source_id)
+            .is_some_and(|shared| {
+                shared.users.remove(runtime_instance_id);
+                shared.users.is_empty()
+            });
+        if remove_capture {
+            self.captures.remove(&prepared.source_id);
+            tracing::info!(
+                source_id = prepared.source_id,
+                "unused shared camera capture released"
+            );
+        }
     }
 }
 

@@ -37,6 +37,10 @@ Implemented:
 - bounded two-second output holdback during recording
 - logical DAW stop-edge trimming before MP4 finalization
 - last-frame synchronization offset and discarded-tail count in take metadata
+- source-ID keyed capture registry shared by multiple VST runtime sessions
+- reference-counted camera preparation and release across sessions
+- one raw-frame copy distributed by shared ownership to independent per-session writers
+- writer-error isolation so one failed output does not terminate the shared camera thread
 
 Camera enumeration initializes the complete Media Foundation platform (`MFSTARTUP_FULL`). The
 reduced `MFSTARTUP_LITE` mode returned an empty list for valid UVC devices during Windows testing.
@@ -46,7 +50,8 @@ Not yet implemented:
 - recording-service idle shutdown and full lifetime management
 - camera sensor-latency calibration and long-duration clock-drift measurement
 - configurable holdback duration and handling for IPC stalls longer than the holdback window
-- shared capture/encoder pipelines for sessions using the same camera
+- shared H.264 encoder output for sessions using the same profile
+- asynchronous per-writer queues and backpressure isolation from the capture thread
 - encoding-profile selection and format enumeration in the GUI
 - preview shared memory
 - fragmented/recoverable container and interrupted-take recovery
@@ -63,6 +68,6 @@ cmake --build build --config Debug --target DAWVideoRecorderPlugin_VST3 -j 4
 cmake --build build --config Debug --target DAWVideoRecorderIpcSmoke -j 4
 ```
 
-The IPC smoke test lets the C++ client automatically launch the Rust service and verifies a real C++/Rust round trip through the Windows Named Pipe, including protocol negotiation, registration, camera enumeration, configuration, transport delivery, and acknowledgement. When a camera is available, it also records and finalizes two consecutive takes through one prepared capture pipeline, verifies distinct MP4 and metadata paths, validates start and end synchronization offsets, requires at least one frame to be recovered from the Arm-time ring buffer, and verifies that an IPC-latency tail frame is discarded across the two takes.
+The IPC smoke test lets two C++ clients automatically launch and connect to the Rust service. It verifies that both clients can arm and record the same physical camera concurrently, receive the same first and last shared frame timestamps, and finalize independent MP4 and metadata paths. One client then records another take while the other remains attached, exercising shared-capture reference lifetime, start/end synchronization, ring recovery, and tail trimming.
 
 This environment supplied duplicate `Path` and `PATH` variables. They were normalized in the CMake process before invoking MSBuild; this is an execution-environment workaround, not a project requirement.
