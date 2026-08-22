@@ -5,6 +5,7 @@ pub mod metadata;
 pub mod protocol;
 pub mod service;
 pub mod session;
+pub mod video_source;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const DEFAULT_PIPE_NAME: &str = r"\\.\pipe\daw-video-recorder-v1";

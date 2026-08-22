@@ -27,6 +27,18 @@ int main()
         return 1;
     }
 
+    const auto sourceDeadline = juce::Time::getMillisecondCounter() + 5000U;
+    while (client.sourceListRevision() == 0U
+           && juce::Time::getMillisecondCounter() < sourceDeadline)
+        juce::Thread::sleep(20);
+
+    if (client.sourceListRevision() == 0U)
+    {
+        std::cerr << "Camera source list was not received\n";
+        client.stop();
+        return 4;
+    }
+
     dawvr::TransportSnapshot snapshot;
     snapshot.sequenceNumber = 1U;
     snapshot.callbackMonotonicTimeNs = 1000;
@@ -48,6 +60,7 @@ int main()
         juce::Thread::sleep(20);
 
     const auto sent = client.sentSnapshotCount();
+    const auto sourceCount = client.availableSources().size();
     const auto status = client.statusText();
     client.stop();
 
@@ -57,6 +70,6 @@ int main()
         return 3;
     }
 
-    std::cout << "IPC smoke test passed\n";
+    std::cout << "IPC smoke test passed; cameras detected: " << sourceCount << '\n';
     return 0;
 }

@@ -46,6 +46,11 @@ public:
     [[nodiscard]] const juce::String& persistentInstanceId() const noexcept;
     [[nodiscard]] const juce::String& projectRoot() const noexcept;
     void setProjectRoot(juce::String newProjectRoot);
+    [[nodiscard]] const juce::String& selectedSourceId() const noexcept;
+    void setSelectedSourceId(juce::String sourceId);
+    [[nodiscard]] std::vector<protocol::CameraSource> availableSources() const;
+    [[nodiscard]] std::uint64_t sourceListRevision() const noexcept;
+    void requestSourceRefresh() noexcept;
 
     [[nodiscard]] std::uint64_t droppedSnapshotCount() const noexcept;
     [[nodiscard]] std::uint64_t sentSnapshotCount() const noexcept;
@@ -64,6 +69,7 @@ private:
     juce::AudioProcessorValueTreeState state;
     juce::String instanceId;
     juce::String selectedProjectRoot;
+    juce::String selectedCameraSourceId;
 
     std::atomic<bool> recordArmState{};
     SpscQueue<TransportSnapshot, 2048U> transportQueue;

@@ -8,6 +8,7 @@ use uuid::Uuid;
 use crate::{
     protocol::{TransportSnapshot, VideoSource},
     session::{RecordingAction, RecordingSession, SessionError, SessionStatus},
+    video_source::{SourceError, enumerate_video_sources},
 };
 
 #[derive(Debug, Error)]
@@ -16,6 +17,10 @@ pub enum ServiceError {
     UnknownInstance(String),
     #[error(transparent)]
     Session(#[from] SessionError),
+    #[error(transparent)]
+    Source(#[from] SourceError),
+    #[error("video source is not available: {0}")]
+    SourceUnavailable(String),
 }
 
 #[derive(Debug, Default)]
@@ -53,7 +58,17 @@ impl RecorderService {
 
     #[must_use]
     pub fn sources(&self) -> Vec<VideoSource> {
-        self.sources.values().cloned().collect()
+        let mut sources: Vec<_> = self.sources.values().cloned().collect();
+        sources.sort_by(|left, right| left.display_name.cmp(&right.display_name));
+        sources
+    }
+
+    pub fn refresh_sources(&mut self) -> Result<Vec<VideoSource>, ServiceError> {
+        self.sources = enumerate_video_sources()?
+            .into_iter()
+            .map(|source| (source.source_id.clone(), source))
+            .collect();
+        Ok(self.sources())
     }
 
     #[must_use]
@@ -66,6 +81,9 @@ impl RecorderService {
         runtime_instance_id: &str,
         source_id: String,
     ) -> Result<SessionStatus, ServiceError> {
+        if !self.sources.contains_key(&source_id) {
+            return Err(ServiceError::SourceUnavailable(source_id));
+        }
         let session = self.session_mut(runtime_instance_id)?;
         session.select_source(source_id)?;
         Ok(session.status())
@@ -124,6 +142,15 @@ impl RecorderService {
 mod tests {
     use super::*;
 
+    fn test_source(source_id: &str) -> VideoSource {
+        VideoSource {
+            source_id: source_id.into(),
+            display_name: "Test camera".into(),
+            formats: Vec::new(),
+            available: true,
+        }
+    }
+
     #[test]
     fn duplicate_persistent_ids_receive_distinct_runtime_ids() {
         let mut service = RecorderService::new();
@@ -144,6 +171,31 @@ mod tests {
         assert_eq!(
             service.session(&second).unwrap().persistent_instance_id(),
             "saved-id"
+        );
+    }
+
+    #[test]
+    fn only_currently_enumerated_sources_can_be_selected() {
+        let mut service = RecorderService::new();
+        let runtime_id = service
+            .register_instance("saved-id".into(), "Camera".into())
+            .runtime_instance_id()
+            .to_owned();
+
+        assert!(matches!(
+            service.select_source(&runtime_id, "missing".into()),
+            Err(ServiceError::SourceUnavailable(source_id)) if source_id == "missing"
+        ));
+
+        service
+            .sources
+            .insert("camera-1".into(), test_source("camera-1"));
+        service
+            .select_source(&runtime_id, "camera-1".into())
+            .unwrap();
+        assert_eq!(
+            service.session(&runtime_id).unwrap().selected_source_id(),
+            Some("camera-1")
         );
     }
 }

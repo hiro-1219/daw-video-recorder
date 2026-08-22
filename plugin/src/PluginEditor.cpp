@@ -16,9 +16,16 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse)
 
     sourceLabel.setText("Camera", juce::dontSendNotification);
     addAndMakeVisible(sourceLabel);
-    sourceSelector.addItem("Camera enumeration pending", 1);
-    sourceSelector.setSelectedId(1);
+    sourceSelector.addItem("Searching for cameras...", 1);
+    sourceSelector.setSelectedId(1, juce::dontSendNotification);
     sourceSelector.setEnabled(false);
+    sourceSelector.onChange = [this] {
+        const auto index = sourceSelector.getSelectedId() - 1;
+        if (index >= 0 && static_cast<std::size_t>(index) < displayedSources.size())
+            processor.setSelectedSourceId(
+                juce::String::fromUTF8(
+                    displayedSources[static_cast<std::size_t>(index)].sourceId.c_str()));
+    };
     addAndMakeVisible(sourceSelector);
 
     projectRootLabel.setText("Project Root", juce::dontSendNotification);
@@ -37,6 +44,7 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse)
     setResizable(true, true);
     setResizeLimits(480, 260, 1000, 700);
     setSize(620, 320);
+    processor.requestSourceRefresh();
     startTimerHz(4);
 }
 
@@ -76,6 +84,7 @@ void PluginEditor::resized()
 
 void PluginEditor::timerCallback()
 {
+    updateSourceSelector();
     const auto connectionState = processor.serviceConnectionState();
     serviceStatusLabel.setText(processor.serviceStatusText(), juce::dontSendNotification);
     const auto colour = connectionState == ServiceConnectionState::connected
@@ -87,6 +96,45 @@ void PluginEditor::timerCallback()
         "Transport sent: " + juce::String(processor.sentSnapshotCount())
             + " / queue drops: " + juce::String(processor.droppedSnapshotCount()),
         juce::dontSendNotification);
+}
+
+void PluginEditor::updateSourceSelector()
+{
+    const auto revision = processor.sourceListRevision();
+    if (revision == 0U || revision == displayedSourceRevision)
+        return;
+
+    const auto available = processor.availableSources();
+    displayedSourceRevision = revision;
+    displayedSources = available;
+    sourceSelector.clear(juce::dontSendNotification);
+    if (displayedSources.empty())
+    {
+        sourceSelector.addItem("No camera detected", 1);
+        sourceSelector.setSelectedId(1, juce::dontSendNotification);
+        sourceSelector.setEnabled(false);
+        return;
+    }
+
+    const auto selectedSource = processor.selectedSourceId().toStdString();
+    auto selectedItem = 0;
+    for (std::size_t index = 0; index < displayedSources.size(); ++index)
+    {
+        const auto& source = displayedSources[index];
+        sourceSelector.addItem(juce::String::fromUTF8(source.displayName.c_str()),
+                               static_cast<int>(index) + 1);
+        if (source.sourceId == selectedSource)
+            selectedItem = static_cast<int>(index) + 1;
+    }
+
+    if (selectedItem == 0)
+    {
+        selectedItem = 1;
+        processor.setSelectedSourceId(
+            juce::String::fromUTF8(displayedSources.front().sourceId.c_str()));
+    }
+    sourceSelector.setSelectedId(selectedItem, juce::dontSendNotification);
+    sourceSelector.setEnabled(true);
 }
 
 void PluginEditor::chooseProjectRoot()

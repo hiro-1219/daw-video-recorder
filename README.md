@@ -36,7 +36,9 @@ The generated VST3 bundle is placed below `build/plugin/DAWVideoRecorderPlugin_a
 
 ## Current implementation status
 
-The VST3 captures host transport snapshots into a real-time-safe SPSC queue. Its background worker connects to the Rust service, negotiates protocol v1, registers the plug-in instance, synchronizes Project Root and Record Arm, and sends acknowledged transport batches. Camera capture and encoding are not connected yet.
+The VST3 captures host transport snapshots into a real-time-safe SPSC queue. Its background worker starts and connects to the Rust service, negotiates protocol v1, enumerates Windows cameras, synchronizes the selected camera, Project Root, and Record Arm, and sends acknowledged transport batches. Media Foundation frame capture and encoding are not connected yet.
+
+During development, start the plug-in host from the repository root or set `DAWVR_SERVICE_PATH` to the full path of `daw-video-recorder-service.exe`. Installed builds look for the service at `%LOCALAPPDATA%\DAW Video Recorder\daw-video-recorder-service.exe`.
 
 ## License
 

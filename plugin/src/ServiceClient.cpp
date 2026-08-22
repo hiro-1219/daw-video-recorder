@@ -2,6 +2,7 @@
 #include "ServiceClient.h"
 
 #include <array>
+#include <memory>
 #include <vector>
 
 namespace dawvr
@@ -12,6 +13,60 @@ constexpr auto pipeName = "daw-video-recorder-v1";
 constexpr auto maximumMessageBytes = 1024U * 1024U;
 constexpr auto ioTimeoutMilliseconds = 1500;
 constexpr auto maximumBatchSize = 64U;
+constexpr auto sourceRefreshIntervalMilliseconds = 2000;
+
+juce::CriticalSection serviceProcessLock;
+std::unique_ptr<juce::ChildProcess> serviceProcess;
+std::int64_t nextLaunchAttemptTimeMs{};
+
+std::vector<juce::File> serviceExecutableCandidates()
+{
+    std::vector<juce::File> candidates;
+    const auto overridePath = juce::SystemStats::getEnvironmentVariable("DAWVR_SERVICE_PATH", {});
+    if (overridePath.isNotEmpty())
+        candidates.emplace_back(overridePath);
+
+    const auto localAppData = juce::SystemStats::getEnvironmentVariable("LOCALAPPDATA", {});
+    if (localAppData.isNotEmpty())
+        candidates.push_back(juce::File(localAppData)
+                                 .getChildFile("DAW Video Recorder")
+                                 .getChildFile("daw-video-recorder-service.exe"));
+
+    const auto workingDirectory = juce::File::getCurrentWorkingDirectory();
+    candidates.push_back(workingDirectory.getChildFile("target")
+                             .getChildFile("debug")
+                             .getChildFile("daw-video-recorder-service.exe"));
+    candidates.push_back(workingDirectory.getChildFile("target")
+                             .getChildFile("release")
+                             .getChildFile("daw-video-recorder-service.exe"));
+    return candidates;
+}
+
+bool tryLaunchRecordingService()
+{
+    const juce::ScopedLock lock(serviceProcessLock);
+    if (serviceProcess != nullptr && serviceProcess->isRunning())
+        return true;
+
+    const auto now = juce::Time::currentTimeMillis();
+    if (now < nextLaunchAttemptTimeMs)
+        return false;
+    nextLaunchAttemptTimeMs = now + 2000;
+
+    for (const auto& candidate : serviceExecutableCandidates())
+    {
+        if (!candidate.existsAsFile())
+            continue;
+        auto process = std::make_unique<juce::ChildProcess>();
+        juce::StringArray arguments { candidate.getFullPathName() };
+        if (process->start(arguments, 0))
+        {
+            serviceProcess = std::move(process);
+            return true;
+        }
+    }
+    return false;
+}
 } // namespace
 
 ServiceClient::ServiceClient(SpscQueue<TransportSnapshot, 2048U>& queueToDrain,
@@ -62,6 +117,22 @@ void ServiceClient::setProjectRoot(juce::String projectRoot)
     notify();
 }
 
+void ServiceClient::setSelectedSource(juce::String sourceId)
+{
+    const juce::ScopedLock lock(configurationLock);
+    if (configuredSourceId == sourceId)
+        return;
+    configuredSourceId = std::move(sourceId);
+    configurationRevision.fetch_add(1U, std::memory_order_release);
+    notify();
+}
+
+void ServiceClient::requestSourceRefresh() noexcept
+{
+    sourceRefreshRequested.store(true, std::memory_order_release);
+    notify();
+}
+
 bool ServiceClient::isWorkerRunning() const noexcept
 {
     return isThreadRunning();
@@ -88,6 +159,17 @@ std::uint64_t ServiceClient::sentSnapshotCount() const noexcept
     return transmittedCount.load(std::memory_order_relaxed);
 }
 
+std::uint64_t ServiceClient::sourceListRevision() const noexcept
+{
+    return receivedSourceListRevision.load(std::memory_order_acquire);
+}
+
+std::vector<protocol::CameraSource> ServiceClient::availableSources() const
+{
+    const juce::ScopedLock lock(sourceLock);
+    return sources;
+}
+
 void ServiceClient::run()
 {
     while (!threadShouldExit())
@@ -98,6 +180,15 @@ void ServiceClient::run()
             while (queue.pop(discarded))
                 consumedCount.fetch_add(1U, std::memory_order_relaxed);
             wait(500);
+            continue;
+        }
+
+        const auto refreshDue = juce::Time::currentTimeMillis() >= nextSourceRefreshTimeMs;
+        if ((refreshDue || sourceRefreshRequested.exchange(false, std::memory_order_acq_rel))
+                && !refreshSources())
+        {
+            disconnect();
+            wait(250);
             continue;
         }
 
@@ -133,7 +224,10 @@ bool ServiceClient::connectAndRegister()
     setStatus(ServiceConnectionState::connecting, "Connecting to recording service...");
     if (!pipe.openExisting(pipeName))
     {
-        setStatus(ServiceConnectionState::error, "Recording service is not running");
+        const auto launched = tryLaunchRecordingService();
+        setStatus(launched ? ServiceConnectionState::connecting : ServiceConnectionState::error,
+                  launched ? "Recording service started; connecting..."
+                           : "Recording service executable was not found");
         return false;
     }
 
@@ -168,9 +262,31 @@ bool ServiceClient::connectAndRegister()
     runtimeInstanceId = response.runtimeInstanceId;
     appliedConfigurationRevision = 0U;
     lastSentProjectRoot.clear();
+    lastSentSourceId.clear();
     lastSentArmed = false;
+    nextSourceRefreshTimeMs = 0;
+    sourceRefreshRequested.store(true, std::memory_order_release);
     setStatus(ServiceConnectionState::connected,
               "Connected to recording service " + juce::String(serviceVersion));
+    return true;
+}
+
+bool ServiceClient::refreshSources()
+{
+    protocol::Response response;
+    const auto requestId = nextRequestId();
+    if (!exchange(protocol::makeListSources(requestId),
+                  requestId,
+                  protocol::ResponseKind::sourceList,
+                  response))
+        return false;
+
+    {
+        const juce::ScopedLock lock(sourceLock);
+        sources = std::move(response.sources);
+    }
+    receivedSourceListRevision.fetch_add(1U, std::memory_order_release);
+    nextSourceRefreshTimeMs = juce::Time::currentTimeMillis() + sourceRefreshIntervalMilliseconds;
     return true;
 }
 
@@ -179,13 +295,27 @@ bool ServiceClient::synchronizeConfiguration()
     const auto revision = configurationRevision.load(std::memory_order_acquire);
     const auto armed = recordArm.load(std::memory_order_acquire);
     juce::String projectRoot;
+    juce::String sourceId;
     {
         const juce::ScopedLock lock(configurationLock);
         projectRoot = configuredProjectRoot;
+        sourceId = configuredSourceId;
     }
     const auto root = projectRoot.toStdString();
+    const auto source = sourceId.toStdString();
 
     protocol::Response response;
+    if (!source.empty() && source != lastSentSourceId)
+    {
+        const auto requestId = nextRequestId();
+        if (!exchange(protocol::makeSelectSource(requestId, runtimeInstanceId, source),
+                      requestId,
+                      protocol::ResponseKind::sessionStateChanged,
+                      response))
+            return false;
+        lastSentSourceId = source;
+    }
+
     if (!root.empty() && root != lastSentProjectRoot)
     {
         const auto requestId = nextRequestId();

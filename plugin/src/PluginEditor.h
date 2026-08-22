@@ -5,6 +5,8 @@
 
 #include <juce_gui_extra/juce_gui_extra.h>
 
+#include <vector>
+
 namespace dawvr
 {
 class PluginEditor final : public juce::AudioProcessorEditor, private juce::Timer
@@ -19,6 +21,7 @@ public:
 private:
     void timerCallback() override;
     void chooseProjectRoot();
+    void updateSourceSelector();
 
     PluginProcessor& processor;
     juce::Label titleLabel;
@@ -32,8 +35,9 @@ private:
     juce::Label metricsLabel;
     std::unique_ptr<juce::FileChooser> fileChooser;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> armAttachment;
+    std::vector<protocol::CameraSource> displayedSources;
+    std::uint64_t displayedSourceRevision{};
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginEditor)
 };
 } // namespace dawvr
-

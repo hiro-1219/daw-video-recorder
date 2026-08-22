@@ -189,6 +189,34 @@ std::string toString(std::span<const std::uint8_t> bytes)
     return { reinterpret_cast<const char*>(bytes.data()), bytes.size() };
 }
 
+bool decodeCameraSource(std::span<const std::uint8_t> payload, CameraSource& source)
+{
+    Reader reader(payload);
+    std::uint32_t field{};
+    std::uint8_t wire{};
+    while (reader.next(field, wire))
+    {
+        if ((field == 1U || field == 2U) && wire == lengthDelimited)
+        {
+            std::span<const std::uint8_t> value;
+            if (!reader.readBytes(value)) return false;
+            if (field == 1U) source.sourceId = toString(value);
+            if (field == 2U) source.displayName = toString(value);
+        }
+        else if (field == 4U && wire == varint)
+        {
+            std::uint64_t value{};
+            if (!reader.readVarint(value)) return false;
+            source.available = value != 0U;
+        }
+        else if (!reader.skip(wire))
+        {
+            return false;
+        }
+    }
+    return !source.sourceId.empty();
+}
+
 bool decodeNested(std::uint32_t payloadField,
                   std::span<const std::uint8_t> payload,
                   Response& response)
@@ -197,6 +225,7 @@ bool decodeNested(std::uint32_t payloadField,
     {
         case 30: response.kind = ResponseKind::helloAck; break;
         case 31: response.kind = ResponseKind::instanceRegistered; break;
+        case 32: response.kind = ResponseKind::sourceList; break;
         case 33: response.kind = ResponseKind::sessionStateChanged; break;
         case 35: response.kind = ResponseKind::error; break;
         case 36: response.kind = ResponseKind::heartbeatAck; break;
@@ -209,6 +238,23 @@ bool decodeNested(std::uint32_t payloadField,
     std::uint8_t wire{};
     while (reader.next(field, wire))
     {
+        if (response.kind == ResponseKind::sourceList)
+        {
+            if (field == 1U && wire == lengthDelimited)
+            {
+                std::span<const std::uint8_t> sourceBytes;
+                if (!reader.readBytes(sourceBytes)) return false;
+                CameraSource source;
+                if (!decodeCameraSource(sourceBytes, source)) return false;
+                response.sources.push_back(std::move(source));
+            }
+            else if (!reader.skip(wire))
+            {
+                return false;
+            }
+            continue;
+        }
+
         std::uint64_t number{};
         std::span<const std::uint8_t> bytes;
         const auto isString = wire == lengthDelimited && reader.readBytes(bytes);
@@ -276,6 +322,21 @@ Bytes makeUnregisterInstance(std::uint64_t requestId, std::string_view runtimeIn
     Bytes message;
     appendString(message, 1, runtimeInstanceId);
     return makeEnvelope(requestId, 12, message);
+}
+
+Bytes makeListSources(std::uint64_t requestId)
+{
+    return makeEnvelope(requestId, 13, {});
+}
+
+Bytes makeSelectSource(std::uint64_t requestId,
+                       std::string_view runtimeInstanceId,
+                       std::string_view sourceId)
+{
+    Bytes message;
+    appendString(message, 1, runtimeInstanceId);
+    appendString(message, 2, sourceId);
+    return makeEnvelope(requestId, 14, message);
 }
 
 Bytes makeSetProjectRoot(std::uint64_t requestId,

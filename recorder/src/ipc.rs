@@ -187,19 +187,22 @@ async fn handle_envelope(
             }
         }
         Payload::ListSources(_) => {
-            let service = service.lock().await;
-            vec![response(
-                request_id,
-                Payload::SourceList(protocol::SourceList {
-                    sources: service.sources(),
-                }),
-            )]
+            let result = service.lock().await.refresh_sources();
+            match result {
+                Ok(sources) => vec![response(
+                    request_id,
+                    Payload::SourceList(protocol::SourceList { sources }),
+                )],
+                Err(error) => vec![service_error(request_id, "", &error)],
+            }
         }
         Payload::SelectSource(select) => {
             let runtime_id = select.runtime_instance_id;
             let result = {
                 let mut service = service.lock().await;
-                service.select_source(&runtime_id, select.source_id)
+                prepare_if_ready(&mut service, &runtime_id, |service| {
+                    service.select_source(&runtime_id, select.source_id)
+                })
             };
             state_or_error(request_id, &runtime_id, result)
         }
@@ -207,7 +210,9 @@ async fn handle_envelope(
             let runtime_id = set_root.runtime_instance_id;
             let result = {
                 let mut service = service.lock().await;
-                service.set_project_root(&runtime_id, PathBuf::from(set_root.project_root))
+                prepare_if_ready(&mut service, &runtime_id, |service| {
+                    service.set_project_root(&runtime_id, PathBuf::from(set_root.project_root))
+                })
             };
             state_or_error(request_id, &runtime_id, result)
         }
@@ -215,11 +220,9 @@ async fn handle_envelope(
             let runtime_id = set_armed.runtime_instance_id;
             let result = {
                 let mut service = service.lock().await;
-                match service.set_armed(&runtime_id, set_armed.armed) {
-                    // Until the capture backend is connected, preparation has no asynchronous work.
-                    Ok(SessionStatus::Preparing) => service.mark_prepared(&runtime_id),
-                    other => other,
-                }
+                prepare_if_ready(&mut service, &runtime_id, |service| {
+                    service.set_armed(&runtime_id, set_armed.armed)
+                })
             };
             state_or_error(request_id, &runtime_id, result)
         }
@@ -264,6 +267,18 @@ async fn handle_envelope(
     }
 }
 
+fn prepare_if_ready(
+    service: &mut RecorderService,
+    runtime_id: &str,
+    configure: impl FnOnce(&mut RecorderService) -> Result<SessionStatus, ServiceError>,
+) -> Result<SessionStatus, ServiceError> {
+    match configure(service) {
+        // Until the capture backend is connected, preparation has no asynchronous work.
+        Ok(SessionStatus::Preparing) => service.mark_prepared(runtime_id),
+        other => other,
+    }
+}
+
 fn state_or_error(
     request_id: u64,
     runtime_id: &str,
@@ -301,6 +316,8 @@ fn service_error(request_id: u64, runtime_id: &str, error: &ServiceError) -> Env
     let code = match error {
         ServiceError::UnknownInstance(_) => "unknown_instance",
         ServiceError::Session(_) => "invalid_session_operation",
+        ServiceError::Source(_) => "source_enumeration_failed",
+        ServiceError::SourceUnavailable(_) => "source_unavailable",
     };
     error_envelope(request_id, code, &error.to_string(), runtime_id)
 }

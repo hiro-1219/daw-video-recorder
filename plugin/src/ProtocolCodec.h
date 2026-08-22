@@ -18,10 +18,20 @@ enum class ResponseKind
     unknown,
     helloAck,
     instanceRegistered,
+    sourceList,
     sessionStateChanged,
     error,
     heartbeatAck,
     transportAccepted
+};
+
+struct CameraSource final
+{
+    std::string sourceId;
+    std::string displayName;
+    bool available{};
+
+    bool operator==(const CameraSource&) const = default;
 };
 
 struct Response final
@@ -36,6 +46,7 @@ struct Response final
     std::string serviceVersion;
     std::string errorCode;
     std::string message;
+    std::vector<CameraSource> sources;
 };
 
 [[nodiscard]] Bytes makeHello(std::uint64_t requestId);
@@ -44,6 +55,10 @@ struct Response final
                                          std::string_view instanceLabel);
 [[nodiscard]] Bytes makeUnregisterInstance(std::uint64_t requestId,
                                            std::string_view runtimeInstanceId);
+[[nodiscard]] Bytes makeListSources(std::uint64_t requestId);
+[[nodiscard]] Bytes makeSelectSource(std::uint64_t requestId,
+                                     std::string_view runtimeInstanceId,
+                                     std::string_view sourceId);
 [[nodiscard]] Bytes makeSetProjectRoot(std::uint64_t requestId,
                                        std::string_view runtimeInstanceId,
                                        std::string_view projectRoot);
@@ -55,4 +70,3 @@ struct Response final
                                        std::span<const TransportSnapshot> snapshots);
 [[nodiscard]] bool decodeResponse(std::span<const std::uint8_t> bytes, Response& response);
 } // namespace dawvr::protocol
-

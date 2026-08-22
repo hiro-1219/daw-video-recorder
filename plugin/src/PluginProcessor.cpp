@@ -12,6 +12,7 @@ constexpr auto stateTreeName = "DAWVideoRecorderState";
 constexpr auto recordArmParameterId = "recordArm";
 constexpr auto instanceIdProperty = "persistentInstanceId";
 constexpr auto projectRootProperty = "projectRoot";
+constexpr auto selectedSourceProperty = "selectedSourceId";
 } // namespace
 
 PluginProcessor::PluginProcessor()
@@ -160,6 +161,7 @@ void PluginProcessor::getStateInformation(juce::MemoryBlock& destinationData)
     auto tree = state.copyState();
     tree.setProperty(instanceIdProperty, instanceId, nullptr);
     tree.setProperty(projectRootProperty, selectedProjectRoot, nullptr);
+    tree.setProperty(selectedSourceProperty, selectedCameraSourceId, nullptr);
     if (const auto xml = tree.createXml())
         copyXmlToBinary(*xml, destinationData);
 }
@@ -174,10 +176,12 @@ void PluginProcessor::setStateInformation(const void* data, int sizeInBytes)
     state.replaceState(tree);
     instanceId = tree.getProperty(instanceIdProperty, juce::Uuid().toString()).toString();
     selectedProjectRoot = tree.getProperty(projectRootProperty).toString();
+    selectedCameraSourceId = tree.getProperty(selectedSourceProperty).toString();
     if (const auto* arm = state.getRawParameterValue(recordArmParameterId))
         recordArmState.store(arm->load() >= 0.5F, std::memory_order_release);
     serviceClient.setIdentity(instanceId, "Camera");
     serviceClient.setProjectRoot(selectedProjectRoot);
+    serviceClient.setSelectedSource(selectedCameraSourceId);
 }
 
 juce::AudioProcessorValueTreeState& PluginProcessor::parameters() noexcept { return state; }
@@ -188,6 +192,32 @@ void PluginProcessor::setProjectRoot(juce::String newProjectRoot)
 {
     selectedProjectRoot = std::move(newProjectRoot);
     serviceClient.setProjectRoot(selectedProjectRoot);
+}
+
+const juce::String& PluginProcessor::selectedSourceId() const noexcept
+{
+    return selectedCameraSourceId;
+}
+
+void PluginProcessor::setSelectedSourceId(juce::String sourceId)
+{
+    selectedCameraSourceId = std::move(sourceId);
+    serviceClient.setSelectedSource(selectedCameraSourceId);
+}
+
+std::vector<protocol::CameraSource> PluginProcessor::availableSources() const
+{
+    return serviceClient.availableSources();
+}
+
+std::uint64_t PluginProcessor::sourceListRevision() const noexcept
+{
+    return serviceClient.sourceListRevision();
+}
+
+void PluginProcessor::requestSourceRefresh() noexcept
+{
+    serviceClient.requestSourceRefresh();
 }
 
 std::uint64_t PluginProcessor::droppedSnapshotCount() const noexcept

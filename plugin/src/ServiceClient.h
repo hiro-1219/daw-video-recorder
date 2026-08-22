@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <string>
+#include <vector>
 
 namespace dawvr
 {
@@ -31,17 +32,22 @@ public:
     void stop();
     void setIdentity(juce::String persistentInstanceId, juce::String instanceLabel);
     void setProjectRoot(juce::String projectRoot);
+    void setSelectedSource(juce::String sourceId);
+    void requestSourceRefresh() noexcept;
 
     [[nodiscard]] bool isWorkerRunning() const noexcept;
     [[nodiscard]] ServiceConnectionState connectionState() const noexcept;
     [[nodiscard]] juce::String statusText() const;
     [[nodiscard]] std::uint64_t consumedSnapshotCount() const noexcept;
     [[nodiscard]] std::uint64_t sentSnapshotCount() const noexcept;
+    [[nodiscard]] std::uint64_t sourceListRevision() const noexcept;
+    [[nodiscard]] std::vector<protocol::CameraSource> availableSources() const;
 
 private:
     void run() override;
     bool connectAndRegister();
     bool synchronizeConfiguration();
+    bool refreshSources();
     bool sendTransportBatch();
     bool sendMessage(const protocol::Bytes& message);
     bool receiveResponse(protocol::Response& response, int timeoutMilliseconds);
@@ -61,7 +67,12 @@ private:
     juce::String persistentId;
     juce::String label { "Camera" };
     juce::String configuredProjectRoot;
+    juce::String configuredSourceId;
     std::atomic<std::uint64_t> configurationRevision { 1U };
+    std::atomic<bool> sourceRefreshRequested { true };
+
+    mutable juce::CriticalSection sourceLock;
+    std::vector<protocol::CameraSource> sources;
 
     mutable juce::CriticalSection statusLock;
     juce::String currentStatus { "Stopped" };
@@ -71,9 +82,11 @@ private:
     std::uint64_t appliedConfigurationRevision{};
     bool lastSentArmed{};
     std::string lastSentProjectRoot;
+    std::string lastSentSourceId;
+    std::int64_t nextSourceRefreshTimeMs{};
     std::uint64_t requestSequence{};
     std::atomic<std::uint64_t> consumedCount{};
     std::atomic<std::uint64_t> transmittedCount{};
+    std::atomic<std::uint64_t> receivedSourceListRevision{};
 };
 } // namespace dawvr
-
