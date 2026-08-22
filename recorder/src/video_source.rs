@@ -42,7 +42,7 @@ mod platform {
                 IMFActivate, IMFAttributes, MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
                 MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
                 MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, MF_VERSION,
-                MFCreateAttributes, MFEnumDeviceSources, MFSTARTUP_LITE, MFShutdown, MFStartup,
+                MFCreateAttributes, MFEnumDeviceSources, MFSTARTUP_FULL, MFShutdown, MFStartup,
             },
             System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize},
         },
@@ -88,8 +88,9 @@ mod platform {
     impl MediaFoundationGuard {
         fn initialize() -> Result<Self, SourceError> {
             // SAFETY: MFStartup is called from a non-work-queue service thread and is balanced by
-            // the Drop implementation below.
-            unsafe { MFStartup(MF_VERSION, MFSTARTUP_LITE) }?;
+            // the Drop implementation below. FULL is required here because LITE/NOSOCKET returned
+            // an empty video-device list on otherwise valid Windows UVC installations.
+            unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) }?;
             Ok(Self)
         }
     }

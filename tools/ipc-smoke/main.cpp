@@ -60,7 +60,7 @@ int main()
         juce::Thread::sleep(20);
 
     const auto sent = client.sentSnapshotCount();
-    const auto sourceCount = client.availableSources().size();
+    const auto sources = client.availableSources();
     const auto status = client.statusText();
     client.stop();
 
@@ -70,6 +70,8 @@ int main()
         return 3;
     }
 
-    std::cout << "IPC smoke test passed; cameras detected: " << sourceCount << '\n';
+    std::cout << "IPC smoke test passed; cameras detected: " << sources.size() << '\n';
+    for (const auto& source : sources)
+        std::cout << "- " << source.displayName << '\n';
     return 0;
 }

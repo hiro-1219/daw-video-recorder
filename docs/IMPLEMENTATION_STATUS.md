@@ -23,6 +23,9 @@ Implemented:
 - Windows Media Foundation camera enumeration with stable symbolic-link IDs
 - live camera list, selection, and selected-camera state persistence in the VST3 UI
 
+Camera enumeration initializes the complete Media Foundation platform (`MFSTARTUP_FULL`). The
+reduced `MFSTARTUP_LITE` mode returned an empty list for valid UVC devices during Windows testing.
+
 Not yet implemented:
 
 - recording-service idle shutdown and full lifetime management
