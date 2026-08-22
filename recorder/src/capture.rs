@@ -28,29 +28,48 @@ pub enum CaptureError {
     InitializationDisconnected,
     #[error("capture thread panicked")]
     ThreadPanicked,
+    #[error("capture command timed out while {0}")]
+    CommandTimeout(&'static str),
+    #[error("capture thread disconnected while {0}")]
+    CommandDisconnected(&'static str),
+    #[error("recording has already started on this prepared capture")]
+    AlreadyRecording,
+    #[error("recording has not started on this prepared capture")]
+    NotRecording,
     #[cfg(not(windows))]
     #[error("camera capture is currently supported on Windows only")]
     UnsupportedPlatform,
 }
 
+enum CaptureCommand {
+    Begin {
+        output_path: PathBuf,
+        response: mpsc::SyncSender<Result<(), CaptureError>>,
+    },
+    End {
+        response: mpsc::SyncSender<Result<CaptureStats, CaptureError>>,
+    },
+    Shutdown,
+}
+
 #[derive(Debug)]
 pub struct CaptureHandle {
-    stop: mpsc::Sender<()>,
-    thread: Option<thread::JoinHandle<Result<CaptureStats, CaptureError>>>,
+    commands: mpsc::Sender<CaptureCommand>,
+    thread: Option<thread::JoinHandle<Result<(), CaptureError>>>,
 }
 
 impl CaptureHandle {
-    pub fn start(source_id: String, output_path: PathBuf) -> Result<Self, CaptureError> {
-        let (stop_sender, stop_receiver) = mpsc::channel();
+    pub fn prepare(source_id: String) -> Result<Self, CaptureError> {
+        let (command_sender, command_receiver) = mpsc::channel();
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
         let capture_thread = thread::Builder::new()
             .name("DAW Video Recorder Capture".into())
-            .spawn(move || platform::run(&source_id, &output_path, &stop_receiver, &ready_sender))
+            .spawn(move || platform::run(&source_id, &command_receiver, &ready_sender))
             .map_err(|_| CaptureError::ThreadPanicked)?;
 
         match ready_receiver.recv_timeout(Duration::from_secs(10)) {
             Ok(Ok(())) => Ok(Self {
-                stop: stop_sender,
+                commands: command_sender,
                 thread: Some(capture_thread),
             }),
             Ok(Err(error)) => {
@@ -58,7 +77,7 @@ impl CaptureHandle {
                 Err(error)
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                let _ = stop_sender.send(());
+                let _ = command_sender.send(CaptureCommand::Shutdown);
                 let _ = capture_thread.join();
                 Err(CaptureError::InitializationTimeout)
             }
@@ -69,19 +88,49 @@ impl CaptureHandle {
         }
     }
 
-    pub fn stop(mut self) -> Result<CaptureStats, CaptureError> {
-        let _ = self.stop.send(());
-        self.thread
-            .take()
-            .expect("capture thread is present until stop")
-            .join()
-            .map_err(|_| CaptureError::ThreadPanicked)?
+    pub fn begin_recording(&self, output_path: PathBuf) -> Result<(), CaptureError> {
+        let (response_sender, response_receiver) = mpsc::sync_channel(1);
+        self.commands
+            .send(CaptureCommand::Begin {
+                output_path,
+                response: response_sender,
+            })
+            .map_err(|_| CaptureError::CommandDisconnected("starting recording"))?;
+        response_receiver
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout => {
+                    CaptureError::CommandTimeout("starting recording")
+                }
+                mpsc::RecvTimeoutError::Disconnected => {
+                    CaptureError::CommandDisconnected("starting recording")
+                }
+            })?
+    }
+
+    pub fn end_recording(&self) -> Result<CaptureStats, CaptureError> {
+        let (response_sender, response_receiver) = mpsc::sync_channel(1);
+        self.commands
+            .send(CaptureCommand::End {
+                response: response_sender,
+            })
+            .map_err(|_| CaptureError::CommandDisconnected("stopping recording"))?;
+        response_receiver
+            .recv_timeout(Duration::from_secs(15))
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout => {
+                    CaptureError::CommandTimeout("stopping recording")
+                }
+                mpsc::RecvTimeoutError::Disconnected => {
+                    CaptureError::CommandDisconnected("stopping recording")
+                }
+            })?
     }
 }
 
 impl Drop for CaptureHandle {
     fn drop(&mut self) {
-        let _ = self.stop.send(());
+        let _ = self.commands.send(CaptureCommand::Shutdown);
         if let Some(capture_thread) = self.thread.take() {
             let _ = capture_thread.join();
         }
@@ -90,14 +139,13 @@ impl Drop for CaptureHandle {
 
 #[cfg(not(windows))]
 mod platform {
-    use super::{CaptureError, CaptureStats, Path, mpsc};
+    use super::{CaptureCommand, CaptureError, mpsc};
 
     pub fn run(
         _source_id: &str,
-        _output_path: &Path,
-        _stop: &mpsc::Receiver<()>,
+        _commands: &mpsc::Receiver<CaptureCommand>,
         ready: &mpsc::SyncSender<Result<(), CaptureError>>,
-    ) -> Result<CaptureStats, CaptureError> {
+    ) -> Result<(), CaptureError> {
         let _ = ready.send(Err(CaptureError::UnsupportedPlatform));
         Err(CaptureError::UnsupportedPlatform)
     }
@@ -112,8 +160,8 @@ mod platform {
         Win32::{
             Foundation::RPC_E_CHANGED_MODE,
             Media::MediaFoundation::{
-                IMFAttributes, IMFByteStream, IMFMediaSource, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
-                MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+                IMFAttributes, IMFByteStream, IMFMediaSource, IMFSinkWriter,
+                MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
                 MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, MF_MT_AVG_BITRATE,
                 MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
                 MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
@@ -129,7 +177,7 @@ mod platform {
         core::{Error as WindowsError, HSTRING},
     };
 
-    use super::{CaptureError, CaptureStats, Path, mpsc};
+    use super::{CaptureCommand, CaptureError, CaptureStats, Path, mpsc};
 
     const VIDEO_STREAM: u32 =
         u32::from_ne_bytes(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0.to_ne_bytes());
@@ -305,12 +353,58 @@ mod platform {
         Ok(output)
     }
 
+    struct ActiveWriter {
+        writer: IMFSinkWriter,
+        stream: u32,
+        first_timestamp: Option<i64>,
+        stats: CaptureStats,
+    }
+
+    fn create_writer(
+        output_path: &Path,
+        input_type: &windows::Win32::Media::MediaFoundation::IMFMediaType,
+        format: FormatInfo,
+    ) -> Result<ActiveWriter, CaptureError> {
+        let output_type = make_output_type(format)?;
+        let output_url = HSTRING::from(output_path.to_string_lossy().as_ref());
+        // SAFETY: The URL is a valid local .mp4 path; byte stream and custom attributes are null.
+        let writer = unsafe {
+            MFCreateSinkWriterFromURL(&output_url, None::<&IMFByteStream>, None::<&IMFAttributes>)
+        }?;
+        // SAFETY: The media types remain alive through configuration and the writer owns its
+        // configured representation after these calls.
+        let stream = unsafe { writer.AddStream(&output_type) }?;
+        unsafe {
+            writer.SetInputMediaType(stream, input_type, None::<&IMFAttributes>)?;
+            writer.BeginWriting()?;
+        }
+        Ok(ActiveWriter {
+            writer,
+            stream,
+            first_timestamp: None,
+            stats: CaptureStats::default(),
+        })
+    }
+
+    fn finalize_writer(active: &ActiveWriter) -> Result<CaptureStats, CaptureError> {
+        tracing::info!(
+            frames = active.stats.frame_count,
+            "finalizing Media Foundation sink writer"
+        );
+        // SAFETY: BeginWriting succeeded and no further samples are submitted after Finalize.
+        unsafe { active.writer.Finalize() }?;
+        tracing::info!(
+            frames = active.stats.frame_count,
+            "Media Foundation sink writer finalized"
+        );
+        Ok(active.stats)
+    }
+
     pub fn run(
         source_id: &str,
-        output_path: &Path,
-        stop: &mpsc::Receiver<()>,
+        commands: &mpsc::Receiver<CaptureCommand>,
         ready: &mpsc::SyncSender<Result<(), CaptureError>>,
-    ) -> Result<CaptureStats, CaptureError> {
+    ) -> Result<(), CaptureError> {
         let initialized = (|| {
             let platform = PlatformGuard::initialize()?;
             let source = MediaSourceGuard(create_media_source(source_id)?);
@@ -321,48 +415,57 @@ mod platform {
             let (input_type, format) = choose_input_type(&reader)?;
             // SAFETY: The selected native type came from this reader and reserved must be null.
             unsafe { reader.SetCurrentMediaType(VIDEO_STREAM, None, &input_type) }?;
-
-            let output_type = make_output_type(format)?;
-            let output_url = HSTRING::from(output_path.to_string_lossy().as_ref());
-            // SAFETY: The URL is a valid local .mp4 path; byte stream and custom attributes are null.
-            let writer = unsafe {
-                MFCreateSinkWriterFromURL(
-                    &output_url,
-                    None::<&IMFByteStream>,
-                    None::<&IMFAttributes>,
-                )
-            }?;
-            // SAFETY: The media types remain alive through configuration and the writer owns its
-            // configured representation after these calls.
-            let writer_stream = unsafe { writer.AddStream(&output_type) }?;
-            unsafe {
-                writer.SetInputMediaType(writer_stream, &input_type, None::<&IMFAttributes>)?;
-                writer.BeginWriting()?;
-            }
-            Ok((platform, source, reader, writer, writer_stream))
+            Ok((platform, source, reader, input_type, format))
         })();
 
-        let (platform, source, reader, writer, writer_stream) = match initialized {
+        let (platform, source, reader, input_type, format) = match initialized {
             Ok(state) => {
-                tracing::info!(path = %output_path.display(), "capture pipeline initialized");
+                tracing::info!(source_id, "capture pipeline prepared");
                 let _ = ready.send(Ok(()));
                 state
             }
             Err(error) => {
                 let _ = ready.send(Err(error));
-                return Ok(CaptureStats::default());
+                return Ok(());
             }
         };
 
-        let mut stats = CaptureStats::default();
-        let mut first_timestamp = None;
-        loop {
-            match stop.try_recv() {
-                Ok(()) | Err(TryRecvError::Disconnected) => {
-                    tracing::info!(frames = stats.frame_count, "capture stop requested");
-                    break;
+        let mut active_writer: Option<ActiveWriter> = None;
+        'capture: loop {
+            loop {
+                match commands.try_recv() {
+                    Ok(CaptureCommand::Begin {
+                        output_path,
+                        response,
+                    }) => {
+                        let result = if active_writer.is_some() {
+                            Err(CaptureError::AlreadyRecording)
+                        } else {
+                            create_writer(&output_path, &input_type, format).map(|writer| {
+                                tracing::info!(
+                                    path = %output_path.display(),
+                                    "prepared capture started recording"
+                                );
+                                active_writer = Some(writer);
+                            })
+                        };
+                        let _ = response.send(result);
+                    }
+                    Ok(CaptureCommand::End { response }) => {
+                        let result = active_writer
+                            .take()
+                            .ok_or(CaptureError::NotRecording)
+                            .and_then(|writer| finalize_writer(&writer));
+                        let _ = response.send(result);
+                    }
+                    Ok(CaptureCommand::Shutdown) | Err(TryRecvError::Disconnected) => {
+                        if let Some(writer) = active_writer.take() {
+                            let _ = finalize_writer(&writer);
+                        }
+                        break 'capture;
+                    }
+                    Err(TryRecvError::Empty) => break,
                 }
-                Err(TryRecvError::Empty) => {}
             }
 
             let mut flags = 0_u32;
@@ -382,33 +485,29 @@ mod platform {
             if flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32) != 0 {
                 break;
             }
-            let Some(sample) = sample else {
-                stats.dropped_frame_count += 1;
+            let Some(active) = active_writer.as_mut() else {
                 continue;
             };
-            let origin = *first_timestamp.get_or_insert(timestamp);
+            let Some(sample) = sample else {
+                active.stats.dropped_frame_count += 1;
+                continue;
+            };
+            let origin = *active.first_timestamp.get_or_insert(timestamp);
             // SAFETY: The sample belongs to this thread. Sink Writer timestamps start at zero.
             unsafe {
                 sample.SetSampleTime(timestamp.saturating_sub(origin))?;
-                writer.WriteSample(writer_stream, &sample)?;
+                active.writer.WriteSample(active.stream, &sample)?;
             }
-            stats.frame_count += 1;
+            active.stats.frame_count += 1;
         }
 
-        // SAFETY: BeginWriting succeeded and no further samples are submitted after Finalize.
-        tracing::info!(
-            frames = stats.frame_count,
-            "finalizing Media Foundation sink writer"
-        );
-        unsafe { writer.Finalize() }?;
-        tracing::info!(
-            frames = stats.frame_count,
-            "Media Foundation sink writer finalized"
-        );
-        drop(writer);
+        if let Some(writer) = active_writer.take() {
+            let _ = finalize_writer(&writer);
+        }
         drop(reader);
         drop(source);
         drop(platform);
-        Ok(stats)
+        tracing::info!(source_id, "prepared capture stopped");
+        Ok(())
     }
 }

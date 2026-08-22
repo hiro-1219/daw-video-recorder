@@ -40,6 +40,10 @@ pub enum TakeError {
     AlreadyActive(String),
     #[error("no recording is active for runtime instance: {0}")]
     NotActive(String),
+    #[error("camera capture is not prepared for runtime instance: {0}")]
+    NotPrepared(String),
+    #[error("prepared camera does not match the selected source")]
+    PreparedSourceMismatch,
     #[error("project root does not exist or cannot be resolved: {0}")]
     InvalidProjectRoot(PathBuf),
     #[error("Recordings directory resolved outside the project root")]
@@ -59,15 +63,52 @@ struct ActiveTake {
     partial_video_path: PathBuf,
     video_path: PathBuf,
     metadata_path: PathBuf,
+}
+
+#[derive(Debug)]
+struct PreparedCapture {
+    source_id: String,
     capture: CaptureHandle,
 }
 
 #[derive(Debug, Default)]
 pub struct TakeCoordinator {
+    prepared: HashMap<String, PreparedCapture>,
     active: HashMap<String, ActiveTake>,
 }
 
 impl TakeCoordinator {
+    pub fn prepare(&mut self, runtime_instance_id: &str, source_id: &str) -> Result<(), TakeError> {
+        if self.active.contains_key(runtime_instance_id) {
+            return Err(TakeError::AlreadyActive(runtime_instance_id.to_owned()));
+        }
+        if self
+            .prepared
+            .get(runtime_instance_id)
+            .is_some_and(|prepared| prepared.source_id == source_id)
+        {
+            return Ok(());
+        }
+
+        self.prepared.remove(runtime_instance_id);
+        let capture = CaptureHandle::prepare(source_id.to_owned())?;
+        self.prepared.insert(
+            runtime_instance_id.to_owned(),
+            PreparedCapture {
+                source_id: source_id.to_owned(),
+                capture,
+            },
+        );
+        tracing::info!(runtime_instance_id, source_id, "camera capture prepared");
+        Ok(())
+    }
+
+    pub fn unprepare(&mut self, runtime_instance_id: &str) {
+        if !self.active.contains_key(runtime_instance_id) {
+            self.prepared.remove(runtime_instance_id);
+        }
+    }
+
     pub fn start(
         &mut self,
         context: TakeContext,
@@ -75,6 +116,13 @@ impl TakeCoordinator {
     ) -> Result<(), TakeError> {
         if self.active.contains_key(&context.runtime_instance_id) {
             return Err(TakeError::AlreadyActive(context.runtime_instance_id));
+        }
+        let prepared = self
+            .prepared
+            .get(&context.runtime_instance_id)
+            .ok_or_else(|| TakeError::NotPrepared(context.runtime_instance_id.clone()))?;
+        if prepared.source_id != context.source_id {
+            return Err(TakeError::PreparedSourceMismatch);
         }
 
         let recordings_root = prepare_recordings_root(&context.project_root)?;
@@ -89,14 +137,10 @@ impl TakeCoordinator {
         let partial_video_path = take_directory.join(format!("{base_name}.partial.mp4"));
         let video_path = take_directory.join(format!("{base_name}.mp4"));
         let metadata_path = take_directory.join(format!("{base_name}.sync.json"));
-        let capture =
-            match CaptureHandle::start(context.source_id.clone(), partial_video_path.clone()) {
-                Ok(capture) => capture,
-                Err(error) => {
-                    let _ = fs::remove_dir(&take_directory);
-                    return Err(error.into());
-                }
-            };
+        if let Err(error) = prepared.capture.begin_recording(partial_video_path.clone()) {
+            let _ = fs::remove_dir(&take_directory);
+            return Err(error.into());
+        }
 
         tracing::info!(
             runtime_instance_id = %context.runtime_instance_id,
@@ -115,7 +159,6 @@ impl TakeCoordinator {
                 partial_video_path,
                 video_path,
                 metadata_path,
-                capture,
             },
         );
         Ok(())
@@ -130,7 +173,12 @@ impl TakeCoordinator {
             .active
             .remove(runtime_instance_id)
             .ok_or_else(|| TakeError::NotActive(runtime_instance_id.to_owned()))?;
-        let stats = active.capture.stop()?;
+        let stats = self
+            .prepared
+            .get(runtime_instance_id)
+            .ok_or_else(|| TakeError::NotPrepared(runtime_instance_id.to_owned()))?
+            .capture
+            .end_recording()?;
         tracing::info!(
             runtime_instance_id,
             take_id = %active.take_id,
@@ -167,7 +215,10 @@ impl TakeCoordinator {
             sync_offset_ns: 0,
             frame_count: stats.frame_count,
             dropped_frame_count: stats.dropped_frame_count,
-            warnings: Vec::new(),
+            warnings: vec![
+                "camera-to-DAW timestamp calibration is not yet available; sync_offset_ns is uncalibrated"
+                    .into(),
+            ],
             finalization_status: "complete".into(),
         };
         write_json(&active.metadata_path, &metadata)?;
@@ -182,11 +233,17 @@ impl TakeCoordinator {
 
     pub fn abort(&mut self, runtime_instance_id: &str) {
         self.active.remove(runtime_instance_id);
+        self.prepared.remove(runtime_instance_id);
     }
 
     #[must_use]
     pub fn is_active(&self, runtime_instance_id: &str) -> bool {
         self.active.contains_key(runtime_instance_id)
+    }
+
+    #[must_use]
+    pub fn is_prepared(&self, runtime_instance_id: &str) -> bool {
+        self.prepared.contains_key(runtime_instance_id)
     }
 }
 

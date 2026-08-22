@@ -304,8 +304,7 @@ fn prepare_if_ready(
     configure: impl FnOnce(&mut RecorderService) -> Result<SessionStatus, ServiceError>,
 ) -> Result<SessionStatus, ServiceError> {
     match configure(service) {
-        // Until the capture backend is connected, preparation has no asynchronous work.
-        Ok(SessionStatus::Preparing) => service.mark_prepared(runtime_id),
+        Ok(SessionStatus::Preparing) => service.prepare_capture(runtime_id),
         other => other,
     }
 }

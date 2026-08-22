@@ -27,6 +27,9 @@ Implemented:
 - collision-resistant take directories below `<Project Root>/Recordings`
 - atomic synchronization metadata with DAW sample positions and captured-frame counts
 - finalized-take path notification and display in the VST3 UI
+- Record Arm-time camera preparation with continuous frame warm-up
+- immediate per-take writer switching without reopening the camera between consecutive takes
+- prepared-camera release on disarm, instance removal, and capture failure
 
 Camera enumeration initializes the complete Media Foundation platform (`MFSTARTUP_FULL`). The
 reduced `MFSTARTUP_LITE` mode returned an empty list for valid UVC devices during Windows testing.
@@ -34,7 +37,7 @@ reduced `MFSTARTUP_LITE` mode returned an empty list for valid UVC devices durin
 Not yet implemented:
 
 - recording-service idle shutdown and full lifetime management
-- Record Arm-time camera pre-roll and timestamp ring buffer
+- timestamped frame pre-roll ring buffer and camera-to-DAW clock correlation
 - shared capture/encoder pipelines for sessions using the same camera
 - encoding-profile selection and format enumeration in the GUI
 - preview shared memory
@@ -52,6 +55,6 @@ cmake --build build --config Debug --target DAWVideoRecorderPlugin_VST3 -j 4
 cmake --build build --config Debug --target DAWVideoRecorderIpcSmoke -j 4
 ```
 
-The IPC smoke test lets the C++ client automatically launch the Rust service and verifies a real C++/Rust round trip through the Windows Named Pipe, including protocol negotiation, registration, camera enumeration, configuration, transport delivery, and acknowledgement.
+The IPC smoke test lets the C++ client automatically launch the Rust service and verifies a real C++/Rust round trip through the Windows Named Pipe, including protocol negotiation, registration, camera enumeration, configuration, transport delivery, and acknowledgement. When a camera is available, it also records and finalizes two consecutive takes through one prepared capture pipeline and verifies that both MP4 and metadata files exist at distinct paths.
 
 This environment supplied duplicate `Path` and `PATH` variables. They were normalized in the CMake process before invoking MSBuild; this is an execution-environment workaround, not a project requirement.

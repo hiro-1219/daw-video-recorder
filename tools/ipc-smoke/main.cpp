@@ -79,6 +79,8 @@ int main()
            && juce::Time::getMillisecondCounter() < sendDeadline)
         juce::Thread::sleep(20);
 
+    dawvr::FinalizedTakeInfo firstFinalizedTake;
+    std::uint32_t preparedStartAcknowledgementMs{};
     if (exerciseCapture)
     {
         juce::Thread::sleep(1500);
@@ -104,6 +106,57 @@ int main()
             client.stop();
             return 7;
         }
+        firstFinalizedTake = client.latestFinalizedTake();
+
+        auto secondStartSnapshot = startSnapshot;
+        secondStartSnapshot.sequenceNumber = 3U;
+        secondStartSnapshot.callbackMonotonicTimeNs = 2000001000;
+        secondStartSnapshot.projectSamplePosition = 96512;
+        const auto secondStartQueuedAt = juce::Time::getMillisecondCounter();
+        if (!queue.push(secondStartSnapshot))
+        {
+            std::cerr << "Queue unexpectedly full during second start\n";
+            client.stop();
+            return 10;
+        }
+
+        const auto secondStartDeadline = juce::Time::getMillisecondCounter() + 5000U;
+        while (client.sentSnapshotCount() < 3U
+               && juce::Time::getMillisecondCounter() < secondStartDeadline)
+            juce::Thread::sleep(20);
+        if (client.sentSnapshotCount() < 3U)
+        {
+            std::cerr << "Prepared capture did not start a second take: " << client.statusText()
+                      << '\n';
+            client.stop();
+            return 11;
+        }
+        preparedStartAcknowledgementMs =
+            juce::Time::getMillisecondCounter() - secondStartQueuedAt;
+
+        juce::Thread::sleep(1000);
+        auto secondStopSnapshot = secondStartSnapshot;
+        secondStopSnapshot.sequenceNumber = 4U;
+        secondStopSnapshot.callbackMonotonicTimeNs = 3000001000;
+        secondStopSnapshot.projectSamplePosition = 144512;
+        secondStopSnapshot.flags &= ~dawvr::TransportFlags::recording;
+        if (!queue.push(secondStopSnapshot))
+        {
+            std::cerr << "Queue unexpectedly full during second stop\n";
+            client.stop();
+            return 12;
+        }
+
+        const auto secondFinalizationDeadline = juce::Time::getMillisecondCounter() + 15000U;
+        while (client.latestFinalizedTake().revision <= firstFinalizedTake.revision
+               && juce::Time::getMillisecondCounter() < secondFinalizationDeadline)
+            juce::Thread::sleep(20);
+        if (client.latestFinalizedTake().revision <= firstFinalizedTake.revision)
+        {
+            std::cerr << "Second recording was not finalized: " << client.statusText() << '\n';
+            client.stop();
+            return 13;
+        }
     }
 
     const auto sent = client.sentSnapshotCount();
@@ -111,7 +164,7 @@ int main()
     const auto status = client.statusText();
     client.stop();
 
-    const auto expectedSnapshots = exerciseCapture ? 2U : 1U;
+    const auto expectedSnapshots = exerciseCapture ? 4U : 1U;
     if (sent != expectedSnapshots)
     {
         std::cerr << "Transport acknowledgement was not received: " << status << '\n';
@@ -123,15 +176,30 @@ int main()
         std::cout << "- " << source.displayName << '\n';
     if (exerciseCapture)
     {
-        const juce::File video(finalizedTake.videoPath);
-        const juce::File metadata(finalizedTake.metadataPath);
-        if (!video.existsAsFile() || video.getSize() == 0 || !metadata.existsAsFile())
+        const auto validateTake = [](const dawvr::FinalizedTakeInfo& take, const char* label) {
+            const juce::File video(take.videoPath);
+            const juce::File metadata(take.metadataPath);
+            if (!video.existsAsFile() || video.getSize() == 0 || !metadata.existsAsFile())
+            {
+                std::cerr << label << " take artifacts are missing\n";
+                return false;
+            }
+            std::cout << label << " MP4 bytes: " << video.getSize() << '\n';
+            std::cout << label << " metadata: " << metadata.getFullPathName() << '\n';
+            return true;
+        };
+        if (!validateTake(firstFinalizedTake, "First")
+            || !validateTake(finalizedTake, "Second"))
         {
-            std::cerr << "Finalized take artifacts are missing\n";
             return 8;
         }
-        std::cout << "Recorded MP4 bytes: " << video.getSize() << '\n';
-        std::cout << "Metadata: " << metadata.getFullPathName() << '\n';
+        if (firstFinalizedTake.videoPath == finalizedTake.videoPath)
+        {
+            std::cerr << "Repeated recording reused the previous output path\n";
+            return 14;
+        }
+        std::cout << "Prepared start acknowledgement ms: "
+                  << preparedStartAcknowledgementMs << '\n';
     }
     if (!testProjectRoot.deleteRecursively())
     {

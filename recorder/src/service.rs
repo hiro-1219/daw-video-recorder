@@ -109,15 +109,24 @@ impl RecorderService {
         runtime_instance_id: &str,
         armed: bool,
     ) -> Result<SessionStatus, ServiceError> {
-        let session = self.session_mut(runtime_instance_id)?;
-        session.set_armed(armed);
-        Ok(session.status())
+        let status = {
+            let session = self.session_mut(runtime_instance_id)?;
+            session.set_armed(armed);
+            session.status()
+        };
+        if !armed && !self.takes.is_active(runtime_instance_id) {
+            self.takes.unprepare(runtime_instance_id);
+        }
+        Ok(status)
     }
 
-    pub fn mark_prepared(
+    pub fn prepare_capture(
         &mut self,
         runtime_instance_id: &str,
     ) -> Result<SessionStatus, ServiceError> {
+        let context = self.take_context(runtime_instance_id)?;
+        self.takes
+            .prepare(runtime_instance_id, &context.source_id)?;
         let session = self.session_mut(runtime_instance_id)?;
         session.mark_prepared()?;
         Ok(session.status())
@@ -142,6 +151,7 @@ impl RecorderService {
             RecordingAction::Start(snapshot) => {
                 let context = self.take_context(runtime_instance_id)?;
                 if let Err(error) = self.takes.start(context, snapshot) {
+                    self.takes.abort(runtime_instance_id);
                     self.session_mut(runtime_instance_id)?.fail();
                     return Err(error.into());
                 }
@@ -151,6 +161,7 @@ impl RecorderService {
                 let finalized = match self.takes.stop(runtime_instance_id, &snapshot) {
                     Ok(finalized) => finalized,
                     Err(error) => {
+                        self.takes.abort(runtime_instance_id);
                         self.session_mut(runtime_instance_id)?.fail();
                         return Err(error.into());
                     }
@@ -159,6 +170,8 @@ impl RecorderService {
                 session.mark_finalized()?;
                 if session.status() == SessionStatus::Preparing {
                     session.mark_prepared()?;
+                } else {
+                    self.takes.unprepare(runtime_instance_id);
                 }
                 Ok(Some(finalized))
             }

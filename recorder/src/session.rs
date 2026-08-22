@@ -290,6 +290,28 @@ mod tests {
     }
 
     #[test]
+    fn armed_session_can_record_multiple_consecutive_takes() {
+        let mut session = configured_session();
+        assert!(matches!(
+            session.handle_transport(snapshot(1, true)),
+            Some(RecordingAction::Start(_))
+        ));
+        assert!(matches!(
+            session.handle_transport(snapshot(2, false)),
+            Some(RecordingAction::Stop(_))
+        ));
+        session.mark_finalized().unwrap();
+        assert_eq!(session.status(), SessionStatus::Preparing);
+        session.mark_prepared().unwrap();
+
+        assert!(matches!(
+            session.handle_transport(snapshot(3, true)),
+            Some(RecordingAction::Start(_))
+        ));
+        assert_eq!(session.status(), SessionStatus::Recording);
+    }
+
+    #[test]
     fn ignores_out_of_order_and_offline_snapshots() {
         let mut session = configured_session();
         let mut offline = snapshot(1, true);
