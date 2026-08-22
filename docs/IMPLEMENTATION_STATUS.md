@@ -22,6 +22,11 @@ Implemented:
 - atomic JSON synchronization-metadata writer
 - Windows Media Foundation camera enumeration with stable symbolic-link IDs
 - live camera list, selection, and selected-camera state persistence in the VST3 UI
+- DAW recording-edge connection to a per-session Media Foundation capture pipeline
+- native uncompressed camera input encoded as H.264 in an MP4 container
+- collision-resistant take directories below `<Project Root>/Recordings`
+- atomic synchronization metadata with DAW sample positions and captured-frame counts
+- finalized-take path notification and display in the VST3 UI
 
 Camera enumeration initializes the complete Media Foundation platform (`MFSTARTUP_FULL`). The
 reduced `MFSTARTUP_LITE` mode returned an empty list for valid UVC devices during Windows testing.
@@ -29,11 +34,12 @@ reduced `MFSTARTUP_LITE` mode returned an empty list for valid UVC devices durin
 Not yet implemented:
 
 - recording-service idle shutdown and full lifetime management
-- Media Foundation frame capture
+- Record Arm-time camera pre-roll and timestamp ring buffer
+- shared capture/encoder pipelines for sessions using the same camera
+- encoding-profile selection and format enumeration in the GUI
 - preview shared memory
-- encoder/muxer and recoverable media container
-- `Recordings` directory creation from the selected Project Root
-- finalized take notifications and Studio One integration tests
+- fragmented/recoverable container and interrupted-take recovery
+- Studio One integration and long-duration synchronization tests
 
 ## Verified commands
 

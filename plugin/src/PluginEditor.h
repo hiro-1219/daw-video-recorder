@@ -33,10 +33,12 @@ private:
     juce::TextButton browseButton { "Browse..." };
     juce::Label serviceStatusLabel;
     juce::Label metricsLabel;
+    juce::Label lastTakeLabel;
     std::unique_ptr<juce::FileChooser> fileChooser;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> armAttachment;
     std::vector<protocol::CameraSource> displayedSources;
     std::uint64_t displayedSourceRevision{};
+    std::uint64_t displayedTakeRevision{};
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginEditor)
 };

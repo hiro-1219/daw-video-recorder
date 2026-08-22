@@ -21,6 +21,14 @@ enum class ServiceConnectionState
     error
 };
 
+struct FinalizedTakeInfo final
+{
+    juce::String takeId;
+    juce::String videoPath;
+    juce::String metadataPath;
+    std::uint64_t revision{};
+};
+
 class ServiceClient final : private juce::Thread
 {
 public:
@@ -42,6 +50,7 @@ public:
     [[nodiscard]] std::uint64_t sentSnapshotCount() const noexcept;
     [[nodiscard]] std::uint64_t sourceListRevision() const noexcept;
     [[nodiscard]] std::vector<protocol::CameraSource> availableSources() const;
+    [[nodiscard]] FinalizedTakeInfo latestFinalizedTake() const;
 
 private:
     void run() override;
@@ -57,6 +66,7 @@ private:
                   protocol::Response& response);
     void disconnect();
     void setStatus(ServiceConnectionState state, juce::String text);
+    void storeFinalizedTake(const protocol::Response& response);
     [[nodiscard]] std::uint64_t nextRequestId() noexcept;
 
     SpscQueue<TransportSnapshot, 2048U>& queue;
@@ -73,6 +83,9 @@ private:
 
     mutable juce::CriticalSection sourceLock;
     std::vector<protocol::CameraSource> sources;
+
+    mutable juce::CriticalSection finalizedTakeLock;
+    FinalizedTakeInfo finalizedTake;
 
     mutable juce::CriticalSection statusLock;
     juce::String currentStatus { "Stopped" };

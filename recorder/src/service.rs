@@ -8,6 +8,7 @@ use uuid::Uuid;
 use crate::{
     protocol::{TransportSnapshot, VideoSource},
     session::{RecordingAction, RecordingSession, SessionError, SessionStatus},
+    take::{FinalizedTake, TakeContext, TakeCoordinator, TakeError},
     video_source::{SourceError, enumerate_video_sources},
 };
 
@@ -21,12 +22,15 @@ pub enum ServiceError {
     Source(#[from] SourceError),
     #[error("video source is not available: {0}")]
     SourceUnavailable(String),
+    #[error(transparent)]
+    Take(#[from] TakeError),
 }
 
 #[derive(Debug, Default)]
 pub struct RecorderService {
     sessions: HashMap<String, RecordingSession>,
     sources: HashMap<String, VideoSource>,
+    takes: TakeCoordinator,
 }
 
 impl RecorderService {
@@ -53,6 +57,7 @@ impl RecorderService {
     }
 
     pub fn unregister_instance(&mut self, runtime_instance_id: &str) -> bool {
+        self.takes.abort(runtime_instance_id);
         self.sessions.remove(runtime_instance_id).is_some()
     }
 
@@ -126,6 +131,64 @@ impl RecorderService {
         let session = self.session_mut(&runtime_instance_id)?;
         let action = session.handle_transport(snapshot);
         Ok((session.status(), action))
+    }
+
+    pub fn execute_recording_action(
+        &mut self,
+        runtime_instance_id: &str,
+        action: RecordingAction,
+    ) -> Result<Option<FinalizedTake>, ServiceError> {
+        match action {
+            RecordingAction::Start(snapshot) => {
+                let context = self.take_context(runtime_instance_id)?;
+                if let Err(error) = self.takes.start(context, snapshot) {
+                    self.session_mut(runtime_instance_id)?.fail();
+                    return Err(error.into());
+                }
+                Ok(None)
+            }
+            RecordingAction::Stop(snapshot) => {
+                let finalized = match self.takes.stop(runtime_instance_id, &snapshot) {
+                    Ok(finalized) => finalized,
+                    Err(error) => {
+                        self.session_mut(runtime_instance_id)?.fail();
+                        return Err(error.into());
+                    }
+                };
+                let session = self.session_mut(runtime_instance_id)?;
+                session.mark_finalized()?;
+                if session.status() == SessionStatus::Preparing {
+                    session.mark_prepared()?;
+                }
+                Ok(Some(finalized))
+            }
+        }
+    }
+
+    fn take_context(&self, runtime_instance_id: &str) -> Result<TakeContext, ServiceError> {
+        let session = self
+            .sessions
+            .get(runtime_instance_id)
+            .ok_or_else(|| ServiceError::UnknownInstance(runtime_instance_id.to_owned()))?;
+        let source_id = session
+            .selected_source_id()
+            .ok_or(SessionError::NotConfigured)?;
+        let source = self
+            .sources
+            .get(source_id)
+            .ok_or_else(|| ServiceError::SourceUnavailable(source_id.to_owned()))?;
+        let project_root = session
+            .project_root()
+            .ok_or(SessionError::NotConfigured)?
+            .to_owned();
+        Ok(TakeContext {
+            persistent_instance_id: session.persistent_instance_id().to_owned(),
+            runtime_instance_id: session.runtime_instance_id().to_owned(),
+            instance_label: session.instance_label().to_owned(),
+            source_id: source_id.to_owned(),
+            source_display_name: source.display_name.clone(),
+            project_root,
+        })
     }
 
     fn session_mut(

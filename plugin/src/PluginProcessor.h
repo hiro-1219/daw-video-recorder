@@ -57,6 +57,7 @@ public:
     [[nodiscard]] bool isTransportWorkerRunning() const noexcept;
     [[nodiscard]] ServiceConnectionState serviceConnectionState() const noexcept;
     [[nodiscard]] juce::String serviceStatusText() const;
+    [[nodiscard]] FinalizedTakeInfo latestFinalizedTake() const;
 
 private:
     template <typename Sample>

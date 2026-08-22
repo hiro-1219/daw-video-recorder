@@ -8,5 +8,6 @@ This file will be updated as dependencies are locked for distribution. The initi
 | Steinberg VST3 SDK | VST3 interfaces | MIT |
 | Protocol Buffers / prost | IPC serialization | BSD-3-Clause / Apache-2.0 |
 | Tokio | Rust asynchronous runtime | MIT |
+| Chrono | UTC take timestamps and file naming | MIT / Apache-2.0 |
 
 Release builds must generate an SBOM and verify the complete transitive dependency set before distribution.

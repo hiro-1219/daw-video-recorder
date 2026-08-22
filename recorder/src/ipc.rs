@@ -236,8 +236,39 @@ async fn handle_envelope(
                 accepted_runtime_id.clone_from(&runtime_id);
                 accepted_sequence = snapshot.sequence_number;
                 match service.handle_transport(snapshot) {
-                    Ok((status, Some(_))) => {
-                        responses.push(state_response(request_id, &runtime_id, status));
+                    Ok((_, Some(action))) => {
+                        match service.execute_recording_action(&runtime_id, action) {
+                            Ok(finalized) => {
+                                if let Some(session) = service.session(&runtime_id) {
+                                    responses.push(state_response(
+                                        request_id,
+                                        &runtime_id,
+                                        session.status(),
+                                    ));
+                                }
+                                if let Some(finalized) = finalized {
+                                    responses.push(response(
+                                        request_id,
+                                        Payload::RecordingFinalized(protocol::RecordingFinalized {
+                                            runtime_instance_id: finalized.runtime_instance_id,
+                                            take_id: finalized.take_id,
+                                            video_path: finalized
+                                                .video_path
+                                                .to_string_lossy()
+                                                .into_owned(),
+                                            metadata_path: finalized
+                                                .metadata_path
+                                                .to_string_lossy()
+                                                .into_owned(),
+                                        }),
+                                    ));
+                                }
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, %runtime_id, "recording action failed");
+                                responses.push(service_error(request_id, &runtime_id, &error));
+                            }
+                        }
                     }
                     Ok((_, None)) => {}
                     Err(error) => responses.push(service_error(request_id, &runtime_id, &error)),
@@ -318,6 +349,7 @@ fn service_error(request_id: u64, runtime_id: &str, error: &ServiceError) -> Env
         ServiceError::Session(_) => "invalid_session_operation",
         ServiceError::Source(_) => "source_enumeration_failed",
         ServiceError::SourceUnavailable(_) => "source_unavailable",
+        ServiceError::Take(_) => "recording_failed",
     };
     error_envelope(request_id, code, &error.to_string(), runtime_id)
 }

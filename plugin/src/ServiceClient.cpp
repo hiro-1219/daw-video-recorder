@@ -11,7 +11,7 @@ namespace
 {
 constexpr auto pipeName = "daw-video-recorder-v1";
 constexpr auto maximumMessageBytes = 1024U * 1024U;
-constexpr auto ioTimeoutMilliseconds = 1500;
+constexpr auto ioTimeoutMilliseconds = 10000;
 constexpr auto maximumBatchSize = 64U;
 constexpr auto sourceRefreshIntervalMilliseconds = 2000;
 
@@ -168,6 +168,12 @@ std::vector<protocol::CameraSource> ServiceClient::availableSources() const
 {
     const juce::ScopedLock lock(sourceLock);
     return sources;
+}
+
+FinalizedTakeInfo ServiceClient::latestFinalizedTake() const
+{
+    const juce::ScopedLock lock(finalizedTakeLock);
+    return finalizedTake;
 }
 
 void ServiceClient::run()
@@ -425,10 +431,24 @@ bool ServiceClient::exchange(const protocol::Bytes& message,
                       juce::String(response.errorCode) + ": " + juce::String(response.message));
             return false;
         }
+        if (response.kind == protocol::ResponseKind::recordingFinalized)
+        {
+            storeFinalizedTake(response);
+            continue;
+        }
         if (response.requestId == requestId && response.kind == expectedKind)
             return true;
     }
     return false;
+}
+
+void ServiceClient::storeFinalizedTake(const protocol::Response& response)
+{
+    const juce::ScopedLock lock(finalizedTakeLock);
+    finalizedTake.takeId = juce::String::fromUTF8(response.takeId.c_str());
+    finalizedTake.videoPath = juce::String::fromUTF8(response.videoPath.c_str());
+    finalizedTake.metadataPath = juce::String::fromUTF8(response.metadataPath.c_str());
+    ++finalizedTake.revision;
 }
 
 void ServiceClient::disconnect()

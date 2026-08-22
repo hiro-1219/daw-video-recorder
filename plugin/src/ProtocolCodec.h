@@ -20,6 +20,7 @@ enum class ResponseKind
     instanceRegistered,
     sourceList,
     sessionStateChanged,
+    recordingFinalized,
     error,
     heartbeatAck,
     transportAccepted
@@ -46,6 +47,9 @@ struct Response final
     std::string serviceVersion;
     std::string errorCode;
     std::string message;
+    std::string takeId;
+    std::string videoPath;
+    std::string metadataPath;
     std::vector<CameraSource> sources;
 };
 

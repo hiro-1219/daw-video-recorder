@@ -40,10 +40,12 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse)
     serviceStatusLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
     addAndMakeVisible(serviceStatusLabel);
     addAndMakeVisible(metricsLabel);
+    lastTakeLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+    addAndMakeVisible(lastTakeLabel);
 
     setResizable(true, true);
-    setResizeLimits(480, 260, 1000, 700);
-    setSize(620, 320);
+    setResizeLimits(480, 300, 1000, 700);
+    setSize(620, 360);
     processor.requestSourceRefresh();
     startTimerHz(4);
 }
@@ -80,6 +82,7 @@ void PluginEditor::resized()
 
     serviceStatusLabel.setBounds(area.removeFromTop(28));
     metricsLabel.setBounds(area.removeFromTop(28));
+    lastTakeLabel.setBounds(area.removeFromTop(48));
 }
 
 void PluginEditor::timerCallback()
@@ -96,6 +99,15 @@ void PluginEditor::timerCallback()
         "Transport sent: " + juce::String(processor.sentSnapshotCount())
             + " / queue drops: " + juce::String(processor.droppedSnapshotCount()),
         juce::dontSendNotification);
+
+    const auto latestTake = processor.latestFinalizedTake();
+    if (latestTake.revision != 0U && latestTake.revision != displayedTakeRevision)
+    {
+        displayedTakeRevision = latestTake.revision;
+        lastTakeLabel.setText("Last take: " + latestTake.videoPath,
+                              juce::dontSendNotification);
+        lastTakeLabel.setTooltip(latestTake.metadataPath);
+    }
 }
 
 void PluginEditor::updateSourceSelector()

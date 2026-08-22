@@ -5,6 +5,7 @@
 /.idea/
 /.agents/
 /.codex/
+/.cache/
 *.user
 *.suo
 *.VC.db

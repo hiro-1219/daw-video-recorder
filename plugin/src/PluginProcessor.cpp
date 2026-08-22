@@ -245,6 +245,11 @@ juce::String PluginProcessor::serviceStatusText() const
     return serviceClient.statusText();
 }
 
+FinalizedTakeInfo PluginProcessor::latestFinalizedTake() const
+{
+    return serviceClient.latestFinalizedTake();
+}
+
 void PluginProcessor::parameterChanged(const juce::String& parameterId, float newValue)
 {
     if (parameterId == recordArmParameterId)

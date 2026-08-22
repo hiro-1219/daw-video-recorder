@@ -227,6 +227,7 @@ bool decodeNested(std::uint32_t payloadField,
         case 31: response.kind = ResponseKind::instanceRegistered; break;
         case 32: response.kind = ResponseKind::sourceList; break;
         case 33: response.kind = ResponseKind::sessionStateChanged; break;
+        case 34: response.kind = ResponseKind::recordingFinalized; break;
         case 35: response.kind = ResponseKind::error; break;
         case 36: response.kind = ResponseKind::heartbeatAck; break;
         case 37: response.kind = ResponseKind::transportAccepted; break;
@@ -283,6 +284,13 @@ bool decodeNested(std::uint32_t payloadField,
             if (field == 1U && isString) response.errorCode = toString(bytes);
             if (field == 2U && isString) response.message = toString(bytes);
             if (field == 3U && isString) response.runtimeInstanceId = toString(bytes);
+        }
+        else if (response.kind == ResponseKind::recordingFinalized)
+        {
+            if (field == 1U && isString) response.runtimeInstanceId = toString(bytes);
+            if (field == 2U && isString) response.takeId = toString(bytes);
+            if (field == 3U && isString) response.videoPath = toString(bytes);
+            if (field == 4U && isString) response.metadataPath = toString(bytes);
         }
         else if (response.kind == ResponseKind::heartbeatAck && field == 1U && isNumber)
         {

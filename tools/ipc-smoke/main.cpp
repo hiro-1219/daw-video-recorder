@@ -8,11 +8,19 @@
 
 int main()
 {
+    const auto testProjectRoot = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                     .getNonexistentChildFile("dawvr-ipc-smoke", {}, true);
+    if (testProjectRoot.createDirectory().failed())
+    {
+        std::cerr << "Could not create temporary project root\n";
+        return 5;
+    }
+
     dawvr::SpscQueue<dawvr::TransportSnapshot, 2048U> queue;
     std::atomic<bool> armed{};
     dawvr::ServiceClient client(queue, armed);
     client.setIdentity("ipc-smoke-test", "IPC Smoke Test");
-    client.setProjectRoot(juce::File::getCurrentWorkingDirectory().getFullPathName());
+    client.setProjectRoot(testProjectRoot.getFullPathName());
     client.start();
 
     const auto connectionDeadline = juce::Time::getMillisecondCounter() + 5000U;
@@ -39,15 +47,27 @@ int main()
         return 4;
     }
 
-    dawvr::TransportSnapshot snapshot;
-    snapshot.sequenceNumber = 1U;
-    snapshot.callbackMonotonicTimeNs = 1000;
-    snapshot.projectSamplePosition = 512;
-    snapshot.sampleRate = 48000.0;
-    snapshot.tempo = 120.0;
-    snapshot.flags = dawvr::TransportFlags::playing | dawvr::TransportFlags::projectSampleValid
-                     | dawvr::TransportFlags::tempoValid;
-    if (!queue.push(snapshot))
+    const auto sources = client.availableSources();
+    const auto exerciseCapture = !sources.empty();
+    if (exerciseCapture)
+    {
+        client.setSelectedSource(juce::String::fromUTF8(sources.front().sourceId.c_str()));
+        armed.store(true, std::memory_order_release);
+        juce::Thread::sleep(500);
+    }
+
+    dawvr::TransportSnapshot startSnapshot;
+    startSnapshot.sequenceNumber = 1U;
+    startSnapshot.callbackMonotonicTimeNs = 1000;
+    startSnapshot.projectSamplePosition = 512;
+    startSnapshot.sampleRate = 48000.0;
+    startSnapshot.tempo = 120.0;
+    startSnapshot.flags = dawvr::TransportFlags::playing
+                          | dawvr::TransportFlags::projectSampleValid
+                          | dawvr::TransportFlags::tempoValid;
+    if (exerciseCapture)
+        startSnapshot.flags |= dawvr::TransportFlags::recording;
+    if (!queue.push(startSnapshot))
     {
         std::cerr << "Queue unexpectedly full\n";
         client.stop();
@@ -59,12 +79,40 @@ int main()
            && juce::Time::getMillisecondCounter() < sendDeadline)
         juce::Thread::sleep(20);
 
+    if (exerciseCapture)
+    {
+        juce::Thread::sleep(1500);
+        auto stopSnapshot = startSnapshot;
+        stopSnapshot.sequenceNumber = 2U;
+        stopSnapshot.callbackMonotonicTimeNs = 1500001000;
+        stopSnapshot.projectSamplePosition = 72512;
+        stopSnapshot.flags &= ~dawvr::TransportFlags::recording;
+        if (!queue.push(stopSnapshot))
+        {
+            std::cerr << "Queue unexpectedly full while stopping\n";
+            client.stop();
+            return 6;
+        }
+
+        const auto finalizationDeadline = juce::Time::getMillisecondCounter() + 15000U;
+        while (client.latestFinalizedTake().revision == 0U
+               && juce::Time::getMillisecondCounter() < finalizationDeadline)
+            juce::Thread::sleep(20);
+        if (client.latestFinalizedTake().revision == 0U)
+        {
+            std::cerr << "Recording was not finalized: " << client.statusText() << '\n';
+            client.stop();
+            return 7;
+        }
+    }
+
     const auto sent = client.sentSnapshotCount();
-    const auto sources = client.availableSources();
+    const auto finalizedTake = client.latestFinalizedTake();
     const auto status = client.statusText();
     client.stop();
 
-    if (sent != 1U)
+    const auto expectedSnapshots = exerciseCapture ? 2U : 1U;
+    if (sent != expectedSnapshots)
     {
         std::cerr << "Transport acknowledgement was not received: " << status << '\n';
         return 3;
@@ -73,5 +121,22 @@ int main()
     std::cout << "IPC smoke test passed; cameras detected: " << sources.size() << '\n';
     for (const auto& source : sources)
         std::cout << "- " << source.displayName << '\n';
+    if (exerciseCapture)
+    {
+        const juce::File video(finalizedTake.videoPath);
+        const juce::File metadata(finalizedTake.metadataPath);
+        if (!video.existsAsFile() || video.getSize() == 0 || !metadata.existsAsFile())
+        {
+            std::cerr << "Finalized take artifacts are missing\n";
+            return 8;
+        }
+        std::cout << "Recorded MP4 bytes: " << video.getSize() << '\n';
+        std::cout << "Metadata: " << metadata.getFullPathName() << '\n';
+    }
+    if (!testProjectRoot.deleteRecursively())
+    {
+        std::cerr << "Could not remove temporary project root\n";
+        return 9;
+    }
     return 0;
 }
