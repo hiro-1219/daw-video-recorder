@@ -8,9 +8,14 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse)
 {
     // Header
     titleLabel.setText("DAW Video Recorder", juce::dontSendNotification);
-    titleLabel.setFont(juce::FontOptions(20.0F, juce::Font::bold));
+    titleLabel.setFont(juce::FontOptions(18.0F, juce::Font::bold));
     titleLabel.setColour(juce::Label::textColourId, juce::Colours::white);
     addAndMakeVisible(titleLabel);
+
+    engineStatusLabel.setFont(juce::FontOptions(12.0F, juce::Font::plain));
+    engineStatusLabel.setColour(juce::Label::textColourId, juce::Colour(0xff88aacc));
+    engineStatusLabel.setJustificationType(juce::Justification::centredLeft);
+    addAndMakeVisible(engineStatusLabel);
 
     serviceStatusLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
     serviceStatusLabel.setJustificationType(juce::Justification::centredRight);
@@ -27,6 +32,12 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse)
         processor.parameters(), "recordArm", recordArmButton);
     addAndMakeVisible(recordArmButton);
 
+    previewToggleButton.setToggleState(processor.isPreviewEnabled(), juce::dontSendNotification);
+    previewToggleButton.onClick = [this] {
+        processor.setPreviewEnabled(previewToggleButton.getToggleState());
+    };
+    addAndMakeVisible(previewToggleButton);
+
     sourceLabel.setText("Camera Source", juce::dontSendNotification);
     sourceLabel.setFont(juce::FontOptions(13.0F, juce::Font::bold));
     addAndMakeVisible(sourceLabel);
@@ -37,9 +48,12 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse)
     sourceSelector.onChange = [this] {
         const auto index = sourceSelector.getSelectedId() - 1;
         if (index >= 0 && static_cast<std::size_t>(index) < displayedSources.size())
+        {
             processor.setSelectedSourceId(
                 juce::String::fromUTF8(
                     displayedSources[static_cast<std::size_t>(index)].sourceId.c_str()));
+            processor.setPreviewEnabled(previewToggleButton.getToggleState());
+        }
     };
     addAndMakeVisible(sourceSelector);
 
@@ -102,9 +116,10 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse)
     addAndMakeVisible(openTakeFolderButton);
 
     setResizable(true, true);
-    setResizeLimits(680, 440, 1400, 900);
-    setSize(840, 520);
+    setResizeLimits(680, 460, 1400, 900);
+    setSize(860, 540);
 
+    processor.startServiceClient();
     processor.setPreviewEnabled(true);
     processor.requestSourceRefresh();
     startTimerHz(15);
@@ -113,7 +128,6 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse)
 PluginEditor::~PluginEditor()
 {
     stopTimer();
-    processor.setPreviewEnabled(false);
 }
 
 void PluginEditor::paint(juce::Graphics& graphics)
@@ -134,7 +148,8 @@ void PluginEditor::resized()
 
     // Top Header (Height: 42px)
     auto headerArea = totalArea.removeFromTop(42).reduced(12, 4);
-    titleLabel.setBounds(headerArea.removeFromLeft(240));
+    titleLabel.setBounds(headerArea.removeFromLeft(200));
+    engineStatusLabel.setBounds(headerArea.removeFromLeft(260));
     serviceStatusLabel.setBounds(headerArea);
 
     // Bottom Footer (Height: 44px)
@@ -147,48 +162,46 @@ void PluginEditor::resized()
     // Center Content (2 Panes)
     auto contentArea = totalArea.reduced(10, 8);
 
-    // Right Control Pane (Fixed width: 300px)
+    // Right Control Pane (Fixed width: 310px)
     auto rightPane = contentArea.removeFromRight(310);
     controlsGroup.setBounds(rightPane);
     auto controlsInner = rightPane.reduced(12, 20);
 
-    // Record Arm Button (Big & prominent)
-    recordArmButton.setBounds(controlsInner.removeFromTop(34));
-    controlsInner.removeFromTop(10);
+    // Record Arm Button
+    recordArmButton.setBounds(controlsInner.removeFromTop(30));
+    controlsInner.removeFromTop(4);
+
+    // Preview Toggle Button
+    previewToggleButton.setBounds(controlsInner.removeFromTop(24));
+    controlsInner.removeFromTop(8);
 
     // Camera Source
-    sourceLabel.setBounds(controlsInner.removeFromTop(20));
-    sourceSelector.setBounds(controlsInner.removeFromTop(28));
+    sourceLabel.setBounds(controlsInner.removeFromTop(18));
+    sourceSelector.setBounds(controlsInner.removeFromTop(26));
     controlsInner.removeFromTop(8);
 
     // Encoding
-    encodingLabel.setBounds(controlsInner.removeFromTop(20));
-    encodingSelector.setBounds(controlsInner.removeFromTop(28));
+    encodingLabel.setBounds(controlsInner.removeFromTop(18));
+    encodingSelector.setBounds(controlsInner.removeFromTop(26));
     controlsInner.removeFromTop(4);
-    hardwareEncoderButton.setBounds(controlsInner.removeFromTop(24));
+    hardwareEncoderButton.setBounds(controlsInner.removeFromTop(22));
     controlsInner.removeFromTop(8);
 
     // Project Root
-    projectRootLabel.setBounds(controlsInner.removeFromTop(20));
-    auto rootRow = controlsInner.removeFromTop(28);
+    projectRootLabel.setBounds(controlsInner.removeFromTop(18));
+    auto rootRow = controlsInner.removeFromTop(26);
     browseButton.setBounds(rootRow.removeFromRight(75));
     rootRow.removeFromRight(6);
     projectRootEditor.setBounds(rootRow);
     controlsInner.removeFromTop(8);
 
     // Sync Offset
-    syncOffsetLabel.setBounds(controlsInner.removeFromTop(20));
-    syncOffsetSlider.setBounds(controlsInner.removeFromTop(28));
+    syncOffsetLabel.setBounds(controlsInner.removeFromTop(18));
+    syncOffsetSlider.setBounds(controlsInner.removeFromTop(26));
 
     // Left Pane: Video Preview (Takes remaining area)
     contentArea.removeFromRight(8); // Gap
     previewComponent.setBounds(contentArea);
-}
-
-void PluginEditor::visibilityChanged()
-{
-    const auto showing = isShowing();
-    processor.setPreviewEnabled(showing);
 }
 
 void PluginEditor::timerCallback()
@@ -202,6 +215,23 @@ void PluginEditor::timerCallback()
                             : (connectionState == ServiceConnectionState::error ? juce::Colour(0xffe53935)
                                                                                 : juce::Colour(0xffff9800));
     serviceStatusLabel.setColour(juce::Label::textColourId, colour);
+
+    // Engine & DAW status display
+    juce::String engineText = "Audio: ";
+    if (processor.isAudioProcessingActive())
+        engineText += "Active (processing)";
+    else
+        engineText += "Idle (no audio block)";
+
+    engineText += " | DAW: ";
+    if (processor.isDawRecording())
+        engineText += "Recording";
+    else if (processor.isDawPlaying())
+        engineText += "Playing";
+    else
+        engineText += "Stopped";
+
+    engineStatusLabel.setText(engineText, juce::dontSendNotification);
 
     metricsLabel.setText(
         "Sent: " + juce::String(processor.sentSnapshotCount())
@@ -224,7 +254,17 @@ void PluginEditor::timerCallback()
 
     // Update preview overlay state
     const auto isArmed = processor.isArmed();
-    // Simulate/track recording duration if armed/connected
+    const auto isRecording = processor.isDawRecording();
+    if (isRecording && !wasRecording)
+    {
+        recordingStartTimeMs = juce::Time::currentTimeMillis();
+        wasRecording = true;
+    }
+    else if (!isRecording && wasRecording)
+    {
+        wasRecording = false;
+    }
+
     std::int64_t duration = 0;
     if (wasRecording)
     {

@@ -18,7 +18,6 @@ public:
 
     void paint(juce::Graphics&) override;
     void resized() override;
-    void visibilityChanged() override;
 
 private:
     void timerCallback() override;
@@ -31,6 +30,7 @@ private:
     // Header
     juce::Label titleLabel;
     juce::Label serviceStatusLabel;
+    juce::Label engineStatusLabel;
 
     // Left pane: Video preview
     VideoPreviewComponent previewComponent;
@@ -38,6 +38,7 @@ private:
     // Right pane: Controls
     juce::GroupComponent controlsGroup{ "controlsGroup", "Settings & Arm" };
     juce::ToggleButton recordArmButton{ "RECORD ARM" };
+    juce::ToggleButton previewToggleButton{ "Preview Live Video" };
     juce::Label sourceLabel;
     juce::ComboBox sourceSelector;
     juce::Label projectRootLabel;

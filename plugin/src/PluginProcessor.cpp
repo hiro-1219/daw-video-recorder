@@ -39,6 +39,7 @@ PluginProcessor::PluginProcessor()
 {
     state.addParameterListener(recordArmParameterId, this);
     serviceClient.setIdentity(instanceId, "Camera");
+    serviceClient.setPreviewEnabled(true);
     serviceClient.start();
 }
 
@@ -50,12 +51,13 @@ PluginProcessor::~PluginProcessor()
 
 void PluginProcessor::prepareToPlay(double, int)
 {
+    audioProcessingActive.store(true, std::memory_order_release);
     serviceClient.start();
 }
 
 void PluginProcessor::releaseResources()
 {
-    serviceClient.stop();
+    audioProcessingActive.store(false, std::memory_order_release);
 }
 
 bool PluginProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -81,8 +83,14 @@ void PluginProcessor::process(juce::AudioBuffer<Sample>& buffer)
 {
     juce::ScopedNoDenormals noDenormals;
     static_cast<void>(buffer); // Audio is deliberately passed through unchanged.
+    audioProcessingActive.store(true, std::memory_order_relaxed);
 
     auto snapshot = captureTransportSnapshot();
+    const auto isPlaying = (snapshot.flags & TransportFlags::playing) != 0U;
+    const auto isRecording = (snapshot.flags & TransportFlags::recording) != 0U;
+    dawPlayingState.store(isPlaying, std::memory_order_relaxed);
+    dawRecordingState.store(isRecording, std::memory_order_relaxed);
+
     if (!transportQueue.push(snapshot))
         droppedSnapshots.fetch_add(1U, std::memory_order_relaxed);
 }
@@ -277,6 +285,7 @@ void PluginProcessor::setSyncOffsetMilliseconds(double milliseconds)
 
 void PluginProcessor::setPreviewEnabled(bool enabled)
 {
+    previewEnabledFlag.store(enabled, std::memory_order_release);
     serviceClient.setPreviewEnabled(enabled);
 }
 

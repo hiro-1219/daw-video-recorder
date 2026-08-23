@@ -59,9 +59,13 @@ public:
     void setSyncOffsetMilliseconds(double milliseconds);
 
     void setPreviewEnabled(bool enabled);
+    [[nodiscard]] bool isPreviewEnabled() const noexcept { return previewEnabledFlag.load(std::memory_order_relaxed); }
     void startServiceClient() noexcept { serviceClient.start(); }
     [[nodiscard]] ServiceClient::PreviewFrameData latestPreviewFrame() const;
     [[nodiscard]] bool isArmed() const noexcept;
+    [[nodiscard]] bool isAudioProcessingActive() const noexcept { return audioProcessingActive.load(std::memory_order_relaxed); }
+    [[nodiscard]] bool isDawPlaying() const noexcept { return dawPlayingState.load(std::memory_order_relaxed); }
+    [[nodiscard]] bool isDawRecording() const noexcept { return dawRecordingState.load(std::memory_order_relaxed); }
 
     [[nodiscard]] std::uint64_t droppedSnapshotCount() const noexcept;
     [[nodiscard]] std::uint64_t sentSnapshotCount() const noexcept;
@@ -87,6 +91,10 @@ private:
     std::int64_t configuredSyncOffsetNs{};
 
     std::atomic<bool> recordArmState{};
+    std::atomic<bool> audioProcessingActive{};
+    std::atomic<bool> dawPlayingState{};
+    std::atomic<bool> dawRecordingState{};
+    std::atomic<bool> previewEnabledFlag { true };
     SpscQueue<TransportSnapshot, 2048U> transportQueue;
     ServiceClient serviceClient;
     std::atomic<std::uint64_t> sequenceNumber{};

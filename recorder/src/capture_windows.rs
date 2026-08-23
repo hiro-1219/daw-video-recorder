@@ -1480,7 +1480,7 @@ pub(crate) fn run(
         let mut timestamp = 0_i64;
         let mut sample = None;
         // SAFETY: All optional output pointers are valid for this synchronous call.
-        unsafe {
+        let read_result = unsafe {
             reader.ReadSample(
                 VIDEO_STREAM,
                 0,
@@ -1488,7 +1488,11 @@ pub(crate) fn run(
                 Some(&raw mut flags),
                 Some(&raw mut timestamp),
                 Some(&raw mut sample),
-            )?;
+            )
+        };
+        if let Err(error) = read_result {
+            tracing::error!(?error, source_id, "ReadSample failed in capture loop");
+            break;
         }
         let arrival_monotonic_time_ns = clock.now_ns()?;
         if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
