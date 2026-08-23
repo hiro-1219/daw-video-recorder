@@ -262,6 +262,7 @@ struct SharedEncoder {
     gop_ring: VecDeque<EncodedPacket>,
     writers: HashMap<String, WriterEndpoint>,
     last_packet_monotonic_time_ns: Option<i64>,
+    latest_sequence_header: Arc<[u8]>,
 }
 
 struct QpcClock {
@@ -817,6 +818,69 @@ impl Drop for H264Encoder {
     }
 }
 
+fn extract_sps_pps(data: &[u8]) -> Option<Vec<u8>> {
+    let mut sps_pps = Vec::new();
+    let mut i = 0;
+    let len = data.len();
+    let mut found_sps = false;
+    let mut found_pps = false;
+
+    while i + 3 < len {
+        let start_code_len = if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+            3
+        } else if i + 4 <= len
+            && data[i] == 0
+            && data[i + 1] == 0
+            && data[i + 2] == 0
+            && data[i + 3] == 1
+        {
+            4
+        } else {
+            i += 1;
+            continue;
+        };
+
+        let nal_start = i;
+        let nal_type_byte = data[i + start_code_len];
+        let nal_type = nal_type_byte & 0x1F;
+
+        let mut next_i = i + start_code_len;
+        while next_i + 2 < len {
+            if next_i + 3 < len
+                && data[next_i] == 0
+                && data[next_i + 1] == 0
+                && data[next_i + 2] == 0
+                && data[next_i + 3] == 1
+            {
+                break;
+            }
+            if data[next_i] == 0 && data[next_i + 1] == 0 && data[next_i + 2] == 1 {
+                break;
+            }
+            next_i += 1;
+        }
+        if next_i + 2 >= len {
+            next_i = len;
+        }
+
+        if nal_type == 7 {
+            found_sps = true;
+            sps_pps.extend_from_slice(&data[nal_start..next_i]);
+        } else if nal_type == 8 {
+            found_pps = true;
+            sps_pps.extend_from_slice(&data[nal_start..next_i]);
+        }
+
+        i = next_i;
+    }
+
+    if found_sps && found_pps {
+        Some(sps_pps)
+    } else {
+        None
+    }
+}
+
 fn copy_encoded_packet(
     sample: &IMFSample,
     source_anchor: i64,
@@ -1176,6 +1240,7 @@ impl SharedEncoder {
             gop_ring: VecDeque::new(),
             writers: HashMap::new(),
             last_packet_monotonic_time_ns: None,
+            latest_sequence_header: Arc::from([]),
         })
     }
 
@@ -1206,10 +1271,14 @@ impl SharedEncoder {
             self.encoder.force_next_keyframe();
             Vec::new()
         };
+        let mut media_config = self.encoder.writer_media_config(self.format, self.profile);
+        if media_config.sequence_header.is_empty() && !self.latest_sequence_header.is_empty() {
+            media_config.sequence_header = self.latest_sequence_header.to_vec();
+        }
         let writer = spawn_writer(
             recording_id.clone(),
             output_path,
-            self.encoder.writer_media_config(self.format, self.profile),
+            media_config,
             self.encoder.backend,
             initial_gop,
             logical_start_monotonic_time_ns,
@@ -1229,13 +1298,21 @@ impl SharedEncoder {
         let samples = self.encoder.process_sample(sample)?;
         let mut failed = Vec::new();
         for sample in samples {
-            let packet = copy_encoded_packet(
+            let mut packet = copy_encoded_packet(
                 &sample,
                 source_anchor,
                 monotonic_anchor,
                 fallback_timestamp,
                 Some(default_duration),
             )?;
+            if let Some(sps_pps) = extract_sps_pps(&packet.bytes) {
+                self.latest_sequence_header = Arc::from(sps_pps);
+            } else if packet.clean_point && !self.latest_sequence_header.is_empty() {
+                let mut with_header = Vec::with_capacity(self.latest_sequence_header.len() + packet.bytes.len());
+                with_header.extend_from_slice(&self.latest_sequence_header);
+                with_header.extend_from_slice(&packet.bytes);
+                packet.bytes = Arc::from(with_header);
+            }
             self.last_packet_monotonic_time_ns = Some(packet.monotonic_time_ns);
             if packet.clean_point {
                 self.gop_ring.clear();
