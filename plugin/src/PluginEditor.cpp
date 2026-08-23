@@ -1,14 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include "PluginEditor.h"
 
+#ifndef DAWVR_GIT_COMMIT_HASH
+#define DAWVR_GIT_COMMIT_HASH "dev"
+#endif
+
 namespace dawvr
 {
 PluginEditor::PluginEditor(PluginProcessor& processorToUse)
     : AudioProcessorEditor(processorToUse), processor(processorToUse)
 {
     // Header
-    titleLabel.setText("DAW Video Recorder", juce::dontSendNotification);
-    titleLabel.setFont(juce::FontOptions(18.0F, juce::Font::bold));
+    titleLabel.setText("DAW Video Recorder [" DAWVR_GIT_COMMIT_HASH "]", juce::dontSendNotification);
+    titleLabel.setFont(juce::FontOptions(16.0F, juce::Font::bold));
     titleLabel.setColour(juce::Label::textColourId, juce::Colours::white);
     addAndMakeVisible(titleLabel);
 
@@ -117,7 +121,7 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse)
 
     setResizable(true, true);
     setResizeLimits(680, 460, 1400, 900);
-    setSize(860, 540);
+    setSize(880, 540);
 
     processor.startServiceClient();
     processor.setPreviewEnabled(true);
@@ -148,7 +152,7 @@ void PluginEditor::resized()
 
     // Top Header (Height: 42px)
     auto headerArea = totalArea.removeFromTop(42).reduced(12, 4);
-    titleLabel.setBounds(headerArea.removeFromLeft(200));
+    titleLabel.setBounds(headerArea.removeFromLeft(250));
     engineStatusLabel.setBounds(headerArea.removeFromLeft(260));
     serviceStatusLabel.setBounds(headerArea);
 

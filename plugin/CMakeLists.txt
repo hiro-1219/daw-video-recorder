@@ -29,11 +29,26 @@ target_sources(DAWVideoRecorderPlugin PRIVATE
 
 target_compile_features(DAWVideoRecorderPlugin PRIVATE cxx_std_20)
 
+find_package(Git QUIET)
+if(GIT_FOUND)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE DAWVR_GIT_HASH
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+endif()
+
+if(NOT DAWVR_GIT_HASH)
+    set(DAWVR_GIT_HASH "unknown")
+endif()
+
 target_compile_definitions(DAWVideoRecorderPlugin
     PUBLIC
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
-        JUCE_VST3_CAN_REPLACE_VST2=0)
+        JUCE_VST3_CAN_REPLACE_VST2=0
+        DAWVR_GIT_COMMIT_HASH="${DAWVR_GIT_HASH}")
 
 if(MSVC)
     # Cache-line padding in the SPSC queue is intentional.
