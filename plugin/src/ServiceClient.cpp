@@ -10,7 +10,7 @@ namespace dawvr
 namespace
 {
 #if JUCE_WINDOWS
-constexpr auto pipeName = R"(\\.\pipe\daw-video-recorder-v2)";
+constexpr auto pipeName = "daw-video-recorder-v2";
 #else
 constexpr auto pipeName = "/tmp/daw-video-recorder.sock";
 #endif
@@ -22,6 +22,12 @@ constexpr int ioTimeoutMilliseconds = 3'000;
 bool tryLaunchRecordingService()
 {
 #if JUCE_WINDOWS
+    static std::int64_t lastLaunchAttemptMs = 0;
+    const auto now = juce::Time::currentTimeMillis();
+    if (now - lastLaunchAttemptMs < 5'000)
+        return false;
+    lastLaunchAttemptMs = now;
+
     const auto localAppDataStr = juce::SystemStats::getEnvironmentVariable("LOCALAPPDATA", {});
     if (localAppDataStr.isNotEmpty())
     {
