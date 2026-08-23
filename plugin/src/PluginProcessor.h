@@ -59,6 +59,7 @@ public:
     void setSyncOffsetMilliseconds(double milliseconds);
 
     void setPreviewEnabled(bool enabled);
+    void startServiceClient() noexcept { serviceClient.start(); }
     [[nodiscard]] ServiceClient::PreviewFrameData latestPreviewFrame() const;
     [[nodiscard]] bool isArmed() const noexcept;
 

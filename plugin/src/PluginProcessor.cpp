@@ -39,6 +39,7 @@ PluginProcessor::PluginProcessor()
 {
     state.addParameterListener(recordArmParameterId, this);
     serviceClient.setIdentity(instanceId, "Camera");
+    serviceClient.start();
 }
 
 PluginProcessor::~PluginProcessor()
