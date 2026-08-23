@@ -863,6 +863,7 @@ fn create_muxer(
     backend: EncodingBackend,
     dropped_packets: Arc<AtomicU64>,
     logical_start_monotonic_time_ns: i64,
+    has_sequence_header: bool,
 ) -> Result<ActiveMuxer, CaptureError> {
     let output_url = HSTRING::from(output_path.to_string_lossy().as_ref());
     let mut attributes: Option<IMFAttributes> = None;
@@ -872,7 +873,9 @@ fn create_muxer(
     // SAFETY: Attribute values configure the MPEG-4 sink writer behavior.
     unsafe {
         attributes.SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1)?;
-        attributes.SetUINT32(&MF_MPEG4SINK_SPSPPS_PASSTHROUGH, 1)?;
+        if has_sequence_header {
+            attributes.SetUINT32(&MF_MPEG4SINK_SPSPPS_PASSTHROUGH, 1)?;
+        }
         attributes.SetUINT32(
             &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
             u32::from(backend == EncodingBackend::Hardware),
@@ -1033,7 +1036,8 @@ fn writer_thread(args: WriterThreadArgs) {
     let initialized = (|| {
         let platform = PlatformGuard::initialize()?;
         let encoded_type = make_output_type(args.media.format, args.media.profile, None)?;
-        if !args.media.sequence_header.is_empty() {
+        let has_sequence_header = !args.media.sequence_header.is_empty();
+        if has_sequence_header {
             unsafe {
                 encoded_type.SetBlob(
                     &MF_MT_MPEG_SEQUENCE_HEADER,
@@ -1047,6 +1051,7 @@ fn writer_thread(args: WriterThreadArgs) {
             args.backend,
             Arc::clone(&args.dropped_packets),
             args.logical_start_monotonic_time_ns,
+            has_sequence_header,
         )?;
         muxer
             .pending_packets
