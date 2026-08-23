@@ -251,6 +251,8 @@ struct H264Encoder {
     codec_api: Option<ICodecAPI>,
     force_keyframe_interval_hns: i64,
     next_forced_keyframe_hns: Option<i64>,
+    last_input_sample_time_hns: i64,
+    default_frame_duration_hns: i64,
 }
 
 struct SharedEncoder {
@@ -618,6 +620,9 @@ impl H264Encoder {
         } else {
             None
         };
+        let default_frame_duration_hns = 10_000_000_i64
+            .saturating_mul(i64::from(format.frame_rate_denominator))
+            / i64::from(format.frame_rate_numerator.max(1));
         Ok(Self {
             transform,
             output_type: output_type.clone(),
@@ -629,10 +634,15 @@ impl H264Encoder {
             codec_api,
             force_keyframe_interval_hns: i64::from(profile.gop_duration_ms) * 10_000,
             next_forced_keyframe_hns: None,
+            last_input_sample_time_hns: 0,
+            default_frame_duration_hns,
         })
     }
 
     fn process_sample(&mut self, sample: &IMFSample) -> Result<Vec<IMFSample>, CaptureError> {
+        if let Ok(ts) = unsafe { sample.GetSampleTime() } {
+            self.last_input_sample_time_hns = ts;
+        }
         self.maybe_force_keyframe(sample);
         if self.event_generator.is_some() {
             let mut output = self.poll_async_events()?;
@@ -811,8 +821,10 @@ fn copy_encoded_packet(
     sample: &IMFSample,
     source_anchor: i64,
     monotonic_anchor: i64,
+    fallback_timestamp: i64,
+    default_duration: Option<i64>,
 ) -> Result<EncodedPacket, CaptureError> {
-    let source_timestamp = unsafe { sample.GetSampleTime() }?;
+    let source_timestamp = unsafe { sample.GetSampleTime() }.unwrap_or(fallback_timestamp);
     let buffer = unsafe { sample.ConvertToContiguousBuffer() }?;
     let mut data = std::ptr::null_mut();
     let mut current_length = 0_u32;
@@ -837,7 +849,9 @@ fn copy_encoded_packet(
         bytes,
         source_timestamp,
         monotonic_time_ns: monotonic_anchor.saturating_add(source_delta_ns),
-        duration: unsafe { sample.GetSampleDuration() }.ok(),
+        duration: unsafe { sample.GetSampleDuration() }
+            .ok()
+            .or(default_duration),
         clean_point: unsafe { sample.GetUINT32(&MFSampleExtension_CleanPoint) }
             .is_ok_and(|value| value != 0),
     })
@@ -1205,10 +1219,18 @@ impl SharedEncoder {
         source_anchor: i64,
         monotonic_anchor: i64,
     ) -> Result<Vec<(String, CaptureError)>, CaptureError> {
+        let fallback_timestamp = self.encoder.last_input_sample_time_hns;
+        let default_duration = self.encoder.default_frame_duration_hns;
         let samples = self.encoder.process_sample(sample)?;
         let mut failed = Vec::new();
         for sample in samples {
-            let packet = copy_encoded_packet(&sample, source_anchor, monotonic_anchor)?;
+            let packet = copy_encoded_packet(
+                &sample,
+                source_anchor,
+                monotonic_anchor,
+                fallback_timestamp,
+                Some(default_duration),
+            )?;
             self.last_packet_monotonic_time_ns = Some(packet.monotonic_time_ns);
             if packet.clean_point {
                 self.gop_ring.clear();
