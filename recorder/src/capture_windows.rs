@@ -39,7 +39,7 @@ use windows::{
             MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_END_STREAMING,
             MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_INFO, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
             MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_I420,
-            MFVideoFormat_IYUV, MFVideoFormat_NV12, MFVideoFormat_YUY2, MFVideoFormat_YV12,
+            MFVideoFormat_IYUV, MFVideoFormat_MJPG, MFVideoFormat_NV12, MFVideoFormat_RGB24, MFVideoFormat_RGB32, MFVideoFormat_YUY2, MFVideoFormat_YV12,
             MFVideoInterlace_Progressive,
         },
         System::{
@@ -317,6 +317,9 @@ fn choose_input_type(reader: &IMFSourceReader) -> Result<(IMFMediaType, FormatIn
     let supported_subtypes = [
         MFVideoFormat_NV12,
         MFVideoFormat_YUY2,
+        MFVideoFormat_MJPG,
+        MFVideoFormat_RGB32,
+        MFVideoFormat_RGB24,
         MFVideoFormat_I420,
         MFVideoFormat_IYUV,
         MFVideoFormat_YV12,
@@ -341,10 +344,17 @@ fn choose_input_type(reader: &IMFSourceReader) -> Result<(IMFMediaType, FormatIn
         }
         let pixels = u64::from(width) * u64::from(height);
         let fps_milli = u64::from(rate_num) * 1000 / u64::from(rate_den);
-        if width > 1280 || height > 720 || fps_milli > 30_000 {
+        if width > 1920 || height > 1080 || fps_milli > 60_000 {
             continue;
         }
-        let score = pixels * 100_000 + fps_milli;
+        let format_bonus: u64 = if subtype == MFVideoFormat_NV12 {
+            30_000_000
+        } else if subtype == MFVideoFormat_YUY2 {
+            20_000_000
+        } else {
+            0
+        };
+        let score = pixels * 10 + fps_milli + format_bonus;
         if best
             .as_ref()
             .is_none_or(|(_, _, best_score)| score > *best_score)
@@ -362,8 +372,29 @@ fn choose_input_type(reader: &IMFSourceReader) -> Result<(IMFMediaType, FormatIn
             ));
         }
     }
-    best.map(|(media_type, format, _)| (media_type, format))
-        .ok_or(CaptureError::NoSupportedFormat)
+    let (native_type, format) = best
+        .map(|(media_type, format, _)| (media_type, format))
+        .ok_or(CaptureError::NoSupportedFormat)?;
+
+    if format.subtype == MFVideoFormat_NV12 || format.subtype == MFVideoFormat_YUY2 {
+        Ok((native_type, format))
+    } else {
+        let target_type = unsafe { MFCreateMediaType() }?;
+        unsafe {
+            target_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
+            target_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)?;
+            target_type.SetUINT64(&MF_MT_FRAME_SIZE, packed_pair(format.width, format.height))?;
+            target_type.SetUINT64(
+                &MF_MT_FRAME_RATE,
+                packed_pair(format.frame_rate_numerator, format.frame_rate_denominator),
+            )?;
+            target_type.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
+            target_type.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, packed_pair(1, 1))?;
+        }
+        let mut decoded_format = format;
+        decoded_format.subtype = MFVideoFormat_NV12;
+        Ok((target_type, decoded_format))
+    }
 }
 
 fn generate_preview_frame(
@@ -397,6 +428,23 @@ fn generate_preview_frame(
 
     let rgb_bytes = if format.subtype == MFVideoFormat_YUY2 {
         crate::preview::convert_yuy2_to_rgb24(
+            slice,
+            format.width as usize,
+            format.height as usize,
+            tw,
+            th,
+        )
+    } else if format.subtype == MFVideoFormat_RGB32 {
+        crate::preview::convert_rgb32_to_rgb24(
+            slice,
+            format.width as usize,
+            format.height as usize,
+            tw,
+            th,
+            true,
+        )
+    } else if format.subtype == MFVideoFormat_RGB24 {
+        crate::preview::downsample_rgb24(
             slice,
             format.width as usize,
             format.height as usize,
@@ -1364,40 +1412,20 @@ pub(crate) fn run(
                     logical_stop_monotonic_time_ns,
                     response,
                 }) => {
-                    if pending_ends.contains_key(&recording_id) {
-                        let _ = response.send(Err(CaptureError::AlreadyRecording));
-                        continue;
-                    }
                     if let Some(error) = failed_writers.remove(&recording_id) {
                         let _ = response.send(Err(CaptureError::WriterFailed(error)));
-                    } else if let Some(profile) = recording_profiles.get(&recording_id).copied() {
-                        let encoded_through_stop = encoders
-                            .get(&profile)
-                            .and_then(|encoder| encoder.last_packet_monotonic_time_ns)
-                            .is_some_and(|last| last >= logical_stop_monotonic_time_ns);
-                        if encoded_through_stop {
-                            recording_profiles.remove(&recording_id);
-                            let writer = encoders
-                                .get_mut(&profile)
-                                .and_then(|encoder| encoder.writers.remove(&recording_id));
-                            if let Some(writer) = writer {
-                                finalize_endpoint_async(
-                                    writer,
-                                    logical_stop_monotonic_time_ns,
-                                    response,
-                                );
-                            } else {
-                                let _ = response.send(Err(CaptureError::NotRecording));
-                            }
-                        } else {
-                            pending_ends.insert(
-                                recording_id,
-                                PendingEnd {
-                                    profile,
-                                    logical_stop_monotonic_time_ns,
-                                    response,
-                                },
+                    } else if let Some(profile) = recording_profiles.remove(&recording_id) {
+                        let writer = encoders
+                            .get_mut(&profile)
+                            .and_then(|encoder| encoder.writers.remove(&recording_id));
+                        if let Some(writer) = writer {
+                            finalize_endpoint_async(
+                                writer,
+                                logical_stop_monotonic_time_ns,
+                                response,
                             );
+                        } else {
+                            let _ = response.send(Err(CaptureError::NotRecording));
                         }
                     } else {
                         let _ = response.send(Err(CaptureError::NotRecording));

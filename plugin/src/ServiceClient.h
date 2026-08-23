@@ -76,6 +76,7 @@ private:
     bool synchronizePreviewState();
     bool refreshSources();
     bool sendTransportBatch();
+    void pollIncomingMessages();
     bool sendMessage(const protocol::Bytes& message);
     bool receiveResponse(protocol::Response& response, int timeoutMilliseconds);
     bool exchange(const protocol::Bytes& message,

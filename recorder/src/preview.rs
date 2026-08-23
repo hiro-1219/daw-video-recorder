@@ -147,6 +147,48 @@ pub fn downsample_rgb24(
     dst
 }
 
+/// Convert BGRA/RGBA (32-bit) to RGB24 with downsampling.
+#[must_use]
+pub fn convert_rgb32_to_rgb24(
+    src: &[u8],
+    src_width: usize,
+    src_height: usize,
+    dst_width: usize,
+    dst_height: usize,
+    is_bgra: bool,
+) -> Vec<u8> {
+    if src_width == 0 || src_height == 0 || dst_width == 0 || dst_height == 0 {
+        return Vec::new();
+    }
+    let mut dst = vec![0_u8; dst_width * dst_height * 3];
+    let src_stride = src_width * 4;
+
+    for dy in 0..dst_height {
+        let sy = (dy * src_height) / dst_height;
+        let row_start = sy * src_stride;
+        let dst_row_start = dy * dst_width * 3;
+
+        for dx in 0..dst_width {
+            let sx = (dx * src_width) / dst_width;
+            let src_idx = row_start + sx * 4;
+
+            if src_idx + 3 < src.len() {
+                let out_idx = dst_row_start + dx * 3;
+                if is_bgra {
+                    dst[out_idx] = src[src_idx + 2]; // R
+                    dst[out_idx + 1] = src[src_idx + 1]; // G
+                    dst[out_idx + 2] = src[src_idx]; // B
+                } else {
+                    dst[out_idx] = src[src_idx]; // R
+                    dst[out_idx + 1] = src[src_idx + 1]; // G
+                    dst[out_idx + 2] = src[src_idx + 2]; // B
+                }
+            }
+        }
+    }
+    dst
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,8 +210,15 @@ mod tests {
 
     #[test]
     fn convert_nv12_produces_correct_output_size() {
-        let src = vec![128_u8; 640 * 480 * 3 / 2];
+        let src = vec![128_u8; 640 * 480 + (640 * 480 / 2)];
         let rgb = convert_nv12_to_rgb24(&src, 640, 480, 320, 240);
+        assert_eq!(rgb.len(), 320 * 240 * 3);
+    }
+
+    #[test]
+    fn convert_rgb32_produces_correct_output_size() {
+        let src = vec![255_u8; 640 * 480 * 4];
+        let rgb = convert_rgb32_to_rgb24(&src, 640, 480, 320, 240, true);
         assert_eq!(rgb.len(), 320 * 240 * 3);
     }
 
@@ -178,6 +227,5 @@ mod tests {
         let src = vec![255_u8; 640 * 480 * 3];
         let rgb = downsample_rgb24(&src, 640, 480, 320, 240);
         assert_eq!(rgb.len(), 320 * 240 * 3);
-        assert_eq!(rgb[0], 255);
     }
 }

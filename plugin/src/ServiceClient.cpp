@@ -11,7 +11,7 @@ namespace
 {
 constexpr auto pipeName = "daw-video-recorder-v2";
 constexpr auto maximumMessageBytes = 1024U * 1024U;
-constexpr auto ioTimeoutMilliseconds = 10000;
+constexpr auto ioTimeoutMilliseconds = 5000;
 constexpr auto maximumBatchSize = 64U;
 constexpr auto sourceRefreshIntervalMilliseconds = 2000;
 
@@ -242,6 +242,7 @@ void ServiceClient::run()
             continue;
         }
 
+        pollIncomingMessages();
         wait(5);
     }
 
@@ -370,6 +371,7 @@ bool ServiceClient::synchronizeConfiguration()
                       response))
             return false;
         lastSentSourceId = source;
+        lastSentPreviewEnabled = false;
     }
 
     if (!root.empty() && root != lastSentProjectRoot)
@@ -429,6 +431,9 @@ bool ServiceClient::synchronizeConfiguration()
 
 bool ServiceClient::synchronizePreviewState()
 {
+    if (lastSentSourceId.empty())
+        return true;
+
     const auto previewEnabled = previewEnabledState.load(std::memory_order_acquire);
     if (previewEnabled == lastSentPreviewEnabled)
         return true;
@@ -475,6 +480,20 @@ bool ServiceClient::sendTransportBatch()
     return true;
 }
 
+void ServiceClient::pollIncomingMessages()
+{
+    for (auto i = 0; i < 8; ++i)
+    {
+        protocol::Response response;
+        if (!receiveResponse(response, 0))
+            break;
+        if (response.kind == protocol::ResponseKind::recordingFinalized)
+            storeFinalizedTake(response);
+        else if (response.kind == protocol::ResponseKind::previewFrame)
+            storePreviewFrame(response);
+    }
+}
+
 bool ServiceClient::sendMessage(const protocol::Bytes& message)
 {
     if (message.size() > maximumMessageBytes)
@@ -508,7 +527,7 @@ bool ServiceClient::receiveResponse(protocol::Response& response, int timeoutMil
         return false;
 
     protocol::Bytes payload(length);
-    if (pipe.read(payload.data(), static_cast<int>(payload.size()), timeoutMilliseconds)
+    if (pipe.read(payload.data(), static_cast<int>(payload.size()), ioTimeoutMilliseconds)
         != static_cast<int>(payload.size()))
         return false;
     return protocol::decodeResponse(payload, response);
@@ -522,7 +541,7 @@ bool ServiceClient::exchange(const protocol::Bytes& message,
     if (!sendMessage(message))
         return false;
 
-    for (auto remainingResponses = 0; remainingResponses < 8; ++remainingResponses)
+    for (auto remainingResponses = 0; remainingResponses < 32; ++remainingResponses)
     {
         if (!receiveResponse(response, ioTimeoutMilliseconds))
             return false;
