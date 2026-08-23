@@ -10,7 +10,7 @@ namespace dawvr
 namespace
 {
 #if JUCE_WINDOWS
-constexpr auto pipeName = R"(\\.\pipe\daw-video-recorder)";
+constexpr auto pipeName = R"(\\.\pipe\daw-video-recorder-v2)";
 #else
 constexpr auto pipeName = "/tmp/daw-video-recorder.sock";
 #endif
