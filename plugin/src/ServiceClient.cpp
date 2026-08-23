@@ -372,6 +372,12 @@ bool ServiceClient::synchronizeConfiguration()
             return false;
         lastSentSourceId = source;
         lastSentPreviewEnabled = false;
+        if (previewEnabledState.load(std::memory_order_acquire))
+        {
+            const auto previewReqId = nextRequestId();
+            sendMessage(protocol::makeRequestPreview(previewReqId, runtimeInstanceId, 480U, 270U, 30U));
+            lastSentPreviewEnabled = true;
+        }
     }
 
     if (!root.empty() && root != lastSentProjectRoot)
@@ -485,7 +491,7 @@ void ServiceClient::pollIncomingMessages()
     for (auto i = 0; i < 8; ++i)
     {
         protocol::Response response;
-        if (!receiveResponse(response, 0))
+        if (!receiveResponse(response, 1))
             break;
         if (response.kind == protocol::ResponseKind::recordingFinalized)
             storeFinalizedTake(response);

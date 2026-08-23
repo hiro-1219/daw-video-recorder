@@ -448,7 +448,9 @@ impl TakeCoordinator {
                     shared.profile_users.remove(&prepared.encoding_profile);
                     let _ = shared.capture.release_profile(prepared.encoding_profile);
                 }
-                shared.profile_users.is_empty() && shared.preview_users.is_empty()
+                shared.profile_users.is_empty()
+                    && shared.preview_users.is_empty()
+                    && !self.preview_subscriptions.values().any(|src| src == &prepared.source_id)
             });
         if remove_capture {
             self.captures.remove(&prepared.source_id);
