@@ -91,6 +91,16 @@ void PluginProcessor::process(juce::AudioBuffer<Sample>& buffer)
     dawPlayingState.store(isPlaying, std::memory_order_relaxed);
     dawRecordingState.store(isRecording, std::memory_order_relaxed);
 
+    if ((snapshot.flags & TransportFlags::projectSampleValid) != 0U)
+    {
+        latestProjectSample.store(snapshot.projectSamplePosition, std::memory_order_relaxed);
+        samplePositionValid.store(true, std::memory_order_relaxed);
+    }
+    else
+    {
+        samplePositionValid.store(false, std::memory_order_relaxed);
+    }
+
     if (!transportQueue.push(snapshot))
         droppedSnapshots.fetch_add(1U, std::memory_order_relaxed);
 }
@@ -207,6 +217,7 @@ void PluginProcessor::setStateInformation(const void* data, int sizeInBytes)
                                      2'000U,
                                      hardwareEncodingPreferred);
     serviceClient.setSyncOffsetNs(configuredSyncOffsetNs);
+    takeManager.refreshTakes(selectedProjectRoot, instanceId);
 }
 
 juce::AudioProcessorValueTreeState& PluginProcessor::parameters() noexcept { return state; }
@@ -217,6 +228,7 @@ void PluginProcessor::setProjectRoot(juce::String newProjectRoot)
 {
     selectedProjectRoot = std::move(newProjectRoot);
     serviceClient.setProjectRoot(selectedProjectRoot);
+    takeManager.refreshTakes(selectedProjectRoot, instanceId);
 }
 
 const juce::String& PluginProcessor::selectedSourceId() const noexcept

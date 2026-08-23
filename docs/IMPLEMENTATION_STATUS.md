@@ -56,6 +56,13 @@ Implemented:
 - metadata schema v2 with selected encoding backend, configured offset, and clock-drift measurements
 - deterministic 30-minute drift-calculation coverage
 - physical-camera smoke tests for shared hardware/software profiles and two simultaneous cameras
+- Windows Media Foundation uncompressed RGB32 video frame decoder (`MFVideoDecoder`) for recorded takes
+- take metadata synchronization manager (`TakeSyncManager`) reading `.sync.json` files from `<Project Root>/Recordings`
+- sample-accurate DAW host transport synchronization (playing / stopped / seek positions)
+- 3 view modes in VST GUI: `Auto (Sync Playback / Live Rec)`, `Recorded Take (DAW Sync)`, `Live Camera Preview`
+- GUI take selector and status overlays (Play/Pause badges, timeline progress bar, out-of-range indicators, REC blink)
+- expected-response IPC correlation for transport batches that interleave state and finalization events
+- `.sync.json` take discovery with read compatibility for legacy `.mp4.json` metadata
 
 Camera enumeration initializes the complete Media Foundation platform (`MFSTARTUP_FULL`). The
 reduced `MFSTARTUP_LITE` mode returned an empty list for valid UVC devices during Windows testing.

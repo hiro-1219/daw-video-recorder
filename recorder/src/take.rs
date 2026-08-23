@@ -258,13 +258,14 @@ impl TakeCoordinator {
         )?;
         let recordings_root = prepare_recordings_root(&context.project_root)?;
         let take_id = format!("take-{}", Uuid::new_v4());
-        let video_name = format!(
-            "{}-{}.mp4",
+        let output_stem = format!(
+            "{}-{}",
             safe_path_component(&context.instance_label),
             take_id
         );
+        let video_name = format!("{output_stem}.mp4");
         let partial_video_name = format!("{video_name}.part");
-        let metadata_name = format!("{video_name}.json");
+        let metadata_name = format!("{output_stem}.sync.json");
         let partial_video_path = recordings_root.join(partial_video_name);
         let video_path = recordings_root.join(video_name);
         let metadata_path = recordings_root.join(metadata_name);

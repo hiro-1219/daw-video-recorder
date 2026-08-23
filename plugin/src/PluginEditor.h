@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #pragma once
 
+#include "MFVideoDecoder.h"
 #include "PluginProcessor.h"
 #include "VideoPreviewComponent.h"
 
@@ -23,9 +24,13 @@ private:
     void timerCallback() override;
     void chooseProjectRoot();
     void updateSourceSelector();
+    void updateTakeSelector();
     void openLatestTakeFolder();
+    void updateVideoPlayback();
+    void updatePreviewLifecycle();
 
     PluginProcessor& processor;
+    MFVideoDecoder videoDecoder;
 
     // Header
     juce::Label titleLabel;
@@ -36,17 +41,26 @@ private:
     VideoPreviewComponent previewComponent;
 
     // Right pane: Controls
-    juce::GroupComponent controlsGroup{ "controlsGroup", "Settings & Arm" };
+    juce::GroupComponent controlsGroup{ "controlsGroup", "Settings & Playback" };
     juce::ToggleButton recordArmButton{ "RECORD ARM" };
-    juce::ToggleButton previewToggleButton{ "Preview Live Video" };
+
+    juce::Label viewModeLabel;
+    juce::ComboBox viewModeSelector;
+
+    juce::Label takeLabel;
+    juce::ComboBox takeSelector;
+
     juce::Label sourceLabel;
     juce::ComboBox sourceSelector;
+
     juce::Label projectRootLabel;
     juce::TextEditor projectRootEditor;
     juce::TextButton browseButton{ "Browse..." };
+
     juce::Label encodingLabel;
     juce::ComboBox encodingSelector;
     juce::ToggleButton hardwareEncoderButton{ "Prefer hardware encoder" };
+
     juce::Label syncOffsetLabel;
     juce::Slider syncOffsetSlider;
 
@@ -60,7 +74,11 @@ private:
     std::vector<protocol::CameraSource> displayedSources;
     std::uint64_t displayedSourceRevision{};
     std::uint64_t displayedTakeRevision{};
+    std::uint64_t displayedTakeManagerRevision{};
     juce::String currentVideoPath;
+    juce::String currentLoadedVideoFile;
+    bool previewStreamingEnabled{ false };
+    bool previewLifecycleInitialized{ false };
 
     juce::int64 recordingStartTimeMs{ 0 };
     bool wasRecording{ false };

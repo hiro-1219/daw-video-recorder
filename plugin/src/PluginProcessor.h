@@ -3,6 +3,7 @@
 
 #include "ServiceClient.h"
 #include "SpscQueue.h"
+#include "TakeSyncManager.h"
 #include "TransportSnapshot.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -66,6 +67,11 @@ public:
     [[nodiscard]] bool isAudioProcessingActive() const noexcept { return audioProcessingActive.load(std::memory_order_relaxed); }
     [[nodiscard]] bool isDawPlaying() const noexcept { return dawPlayingState.load(std::memory_order_relaxed); }
     [[nodiscard]] bool isDawRecording() const noexcept { return dawRecordingState.load(std::memory_order_relaxed); }
+    [[nodiscard]] std::int64_t currentProjectSample() const noexcept { return latestProjectSample.load(std::memory_order_relaxed); }
+    [[nodiscard]] bool isProjectSampleValid() const noexcept { return samplePositionValid.load(std::memory_order_relaxed); }
+
+    [[nodiscard]] TakeSyncManager& takeSyncManager() noexcept { return takeManager; }
+    [[nodiscard]] const TakeSyncManager& takeSyncManager() const noexcept { return takeManager; }
 
     [[nodiscard]] std::uint64_t droppedSnapshotCount() const noexcept;
     [[nodiscard]] std::uint64_t sentSnapshotCount() const noexcept;
@@ -94,9 +100,12 @@ private:
     std::atomic<bool> audioProcessingActive{};
     std::atomic<bool> dawPlayingState{};
     std::atomic<bool> dawRecordingState{};
+    std::atomic<std::int64_t> latestProjectSample{ 0 };
+    std::atomic<bool> samplePositionValid{ false };
     std::atomic<bool> previewEnabledFlag { true };
     SpscQueue<TransportSnapshot, 2048U> transportQueue;
     ServiceClient serviceClient;
+    TakeSyncManager takeManager;
     std::atomic<std::uint64_t> sequenceNumber{};
     std::atomic<std::uint64_t> droppedSnapshots{};
 

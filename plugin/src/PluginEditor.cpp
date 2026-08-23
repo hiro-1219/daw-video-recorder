@@ -36,11 +36,43 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse)
         processor.parameters(), "recordArm", recordArmButton);
     addAndMakeVisible(recordArmButton);
 
-    previewToggleButton.setToggleState(processor.isPreviewEnabled(), juce::dontSendNotification);
-    previewToggleButton.onClick = [this] {
-        processor.setPreviewEnabled(previewToggleButton.getToggleState());
+    viewModeLabel.setText("View Mode", juce::dontSendNotification);
+    viewModeLabel.setFont(juce::FontOptions(13.0F, juce::Font::bold));
+    addAndMakeVisible(viewModeLabel);
+
+    viewModeSelector.addItem("Auto (Sync Playback / Live Rec)", 1);
+    viewModeSelector.addItem("Recorded Take (DAW Sync)", 2);
+    viewModeSelector.addItem("Live Camera Preview", 3);
+    viewModeSelector.setSelectedId(1, juce::dontSendNotification);
+    viewModeSelector.onChange = [this] {
+        const auto id = viewModeSelector.getSelectedId();
+        if (id == 1)
+            previewComponent.setViewMode(VideoViewMode::autoSync);
+        else if (id == 2)
+            previewComponent.setViewMode(VideoViewMode::recordedTake);
+        else if (id == 3)
+            previewComponent.setViewMode(VideoViewMode::liveCamera);
+        updatePreviewLifecycle();
     };
-    addAndMakeVisible(previewToggleButton);
+    addAndMakeVisible(viewModeSelector);
+
+    takeLabel.setText("Recorded Take", juce::dontSendNotification);
+    takeLabel.setFont(juce::FontOptions(13.0F, juce::Font::bold));
+    addAndMakeVisible(takeLabel);
+
+    takeSelector.addItem("No recorded takes", 1);
+    takeSelector.setSelectedId(1, juce::dontSendNotification);
+    takeSelector.setEnabled(false);
+    takeSelector.onChange = [this] {
+        const auto takeId = takeSelector.getSelectedId();
+        const auto takes = processor.takeSyncManager().getAvailableTakes();
+        const auto index = takeId - 1;
+        if (index >= 0 && static_cast<std::size_t>(index) < takes.size())
+        {
+            processor.takeSyncManager().setSelectedTakeId(takes[static_cast<std::size_t>(index)].takeId);
+        }
+    };
+    addAndMakeVisible(takeSelector);
 
     sourceLabel.setText("Camera Source", juce::dontSendNotification);
     sourceLabel.setFont(juce::FontOptions(13.0F, juce::Font::bold));
@@ -56,7 +88,6 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse)
             processor.setSelectedSourceId(
                 juce::String::fromUTF8(
                     displayedSources[static_cast<std::size_t>(index)].sourceId.c_str()));
-            processor.setPreviewEnabled(previewToggleButton.getToggleState());
         }
     };
     addAndMakeVisible(sourceSelector);
@@ -120,18 +151,22 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse)
     addAndMakeVisible(openTakeFolderButton);
 
     setResizable(true, true);
-    setResizeLimits(680, 460, 1400, 900);
-    setSize(880, 540);
+    setResizeLimits(720, 500, 1600, 1000);
+    setSize(920, 580);
 
     processor.startServiceClient();
-    processor.setPreviewEnabled(true);
     processor.requestSourceRefresh();
-    startTimerHz(15);
+    processor.takeSyncManager().refreshTakes(processor.projectRoot(), processor.persistentInstanceId());
+    updatePreviewLifecycle();
+
+    startTimerHz(30);
 }
 
 PluginEditor::~PluginEditor()
 {
     stopTimer();
+    processor.setPreviewEnabled(false);
+    videoDecoder.close();
 }
 
 void PluginEditor::paint(juce::Graphics& graphics)
@@ -166,42 +201,48 @@ void PluginEditor::resized()
     // Center Content (2 Panes)
     auto contentArea = totalArea.reduced(10, 8);
 
-    // Right Control Pane (Fixed width: 310px)
-    auto rightPane = contentArea.removeFromRight(310);
+    // Right Control Pane (Fixed width: 320px)
+    auto rightPane = contentArea.removeFromRight(320);
     controlsGroup.setBounds(rightPane);
     auto controlsInner = rightPane.reduced(12, 20);
 
     // Record Arm Button
-    recordArmButton.setBounds(controlsInner.removeFromTop(30));
+    recordArmButton.setBounds(controlsInner.removeFromTop(28));
     controlsInner.removeFromTop(4);
 
-    // Preview Toggle Button
-    previewToggleButton.setBounds(controlsInner.removeFromTop(24));
-    controlsInner.removeFromTop(8);
+    // View Mode
+    viewModeLabel.setBounds(controlsInner.removeFromTop(16));
+    viewModeSelector.setBounds(controlsInner.removeFromTop(24));
+    controlsInner.removeFromTop(6);
+
+    // Recorded Take
+    takeLabel.setBounds(controlsInner.removeFromTop(16));
+    takeSelector.setBounds(controlsInner.removeFromTop(24));
+    controlsInner.removeFromTop(6);
 
     // Camera Source
-    sourceLabel.setBounds(controlsInner.removeFromTop(18));
-    sourceSelector.setBounds(controlsInner.removeFromTop(26));
-    controlsInner.removeFromTop(8);
+    sourceLabel.setBounds(controlsInner.removeFromTop(16));
+    sourceSelector.setBounds(controlsInner.removeFromTop(24));
+    controlsInner.removeFromTop(6);
 
     // Encoding
-    encodingLabel.setBounds(controlsInner.removeFromTop(18));
-    encodingSelector.setBounds(controlsInner.removeFromTop(26));
-    controlsInner.removeFromTop(4);
-    hardwareEncoderButton.setBounds(controlsInner.removeFromTop(22));
-    controlsInner.removeFromTop(8);
+    encodingLabel.setBounds(controlsInner.removeFromTop(16));
+    encodingSelector.setBounds(controlsInner.removeFromTop(24));
+    controlsInner.removeFromTop(2);
+    hardwareEncoderButton.setBounds(controlsInner.removeFromTop(20));
+    controlsInner.removeFromTop(6);
 
     // Project Root
-    projectRootLabel.setBounds(controlsInner.removeFromTop(18));
-    auto rootRow = controlsInner.removeFromTop(26);
+    projectRootLabel.setBounds(controlsInner.removeFromTop(16));
+    auto rootRow = controlsInner.removeFromTop(24);
     browseButton.setBounds(rootRow.removeFromRight(75));
     rootRow.removeFromRight(6);
     projectRootEditor.setBounds(rootRow);
-    controlsInner.removeFromTop(8);
+    controlsInner.removeFromTop(6);
 
     // Sync Offset
-    syncOffsetLabel.setBounds(controlsInner.removeFromTop(18));
-    syncOffsetSlider.setBounds(controlsInner.removeFromTop(26));
+    syncOffsetLabel.setBounds(controlsInner.removeFromTop(16));
+    syncOffsetSlider.setBounds(controlsInner.removeFromTop(24));
 
     // Left Pane: Video Preview (Takes remaining area)
     contentArea.removeFromRight(8); // Gap
@@ -211,6 +252,7 @@ void PluginEditor::resized()
 void PluginEditor::timerCallback()
 {
     updateSourceSelector();
+    updateTakeSelector();
 
     const auto connectionState = processor.serviceConnectionState();
     serviceStatusLabel.setText(processor.serviceStatusText(), juce::dontSendNotification);
@@ -223,9 +265,9 @@ void PluginEditor::timerCallback()
     // Engine & DAW status display
     juce::String engineText = "Audio: ";
     if (processor.isAudioProcessingActive())
-        engineText += "Active (processing)";
+        engineText += "Active";
     else
-        engineText += "Idle (no audio block)";
+        engineText += "Idle";
 
     engineText += " | DAW: ";
     if (processor.isDawRecording())
@@ -235,6 +277,10 @@ void PluginEditor::timerCallback()
     else
         engineText += "Stopped";
 
+    if (processor.isProjectSampleValid())
+    {
+        engineText += " [SMP: " + juce::String(processor.currentProjectSample()) + "]";
+    }
     engineStatusLabel.setText(engineText, juce::dontSendNotification);
 
     metricsLabel.setText(
@@ -251,12 +297,13 @@ void PluginEditor::timerCallback()
                               juce::dontSendNotification);
         lastTakeLabel.setTooltip(latestTake.videoPath);
         openTakeFolderButton.setEnabled(juce::File(currentVideoPath).existsAsFile());
+        processor.takeSyncManager().addFinalizedTake(latestTake.metadataPath);
     }
 
-    // Update preview frame from service client
-    previewComponent.setFrameData(processor.latestPreviewFrame());
+    // Update live preview frame from service client
+    previewComponent.setLiveFrameData(processor.latestPreviewFrame());
 
-    // Update preview overlay state
+    // Update live recording overlay state
     const auto isArmed = processor.isArmed();
     const auto isRecording = processor.isDawRecording();
     if (isRecording && !wasRecording)
@@ -274,11 +321,179 @@ void PluginEditor::timerCallback()
     {
         duration = juce::Time::currentTimeMillis() - recordingStartTimeMs;
     }
-    previewComponent.updateState(connectionState,
-                                 processor.serviceStatusText(),
-                                 isArmed,
-                                 wasRecording,
-                                 duration);
+    previewComponent.updateServiceState(connectionState,
+                                        processor.serviceStatusText(),
+                                        isArmed,
+                                        wasRecording,
+                                        duration);
+
+    updatePreviewLifecycle();
+
+    // Update synchronized recorded video playback
+    updateVideoPlayback();
+}
+
+void PluginEditor::updateVideoPlayback()
+{
+    const auto selectedTake = processor.takeSyncManager().getSelectedTake();
+    VideoPreviewComponent::PlaybackState pbState;
+    pbState.isDawPlaying = processor.isDawPlaying();
+    pbState.isDawRecording = processor.isDawRecording();
+    pbState.isArmed = processor.isArmed();
+    pbState.currentDawSample = processor.currentProjectSample();
+
+    if (selectedTake.has_value())
+    {
+        pbState.hasTake = true;
+        pbState.takeLabel = selectedTake->takeId.isNotEmpty()
+                                ? selectedTake->takeId
+                                : juce::File(selectedTake->videoPath).getFileName();
+
+        if (selectedTake->sampleRate > 0.0)
+        {
+            pbState.totalDurationSec = static_cast<double>(selectedTake->endProjectSample - selectedTake->startProjectSample)
+                                       / selectedTake->sampleRate;
+        }
+
+        const auto viewMode = previewComponent.getViewMode();
+        const auto shouldDecodeRecordedTake = viewMode == VideoViewMode::recordedTake
+                                              || (viewMode == VideoViewMode::autoSync
+                                                  && !pbState.isArmed
+                                                  && !pbState.isDawRecording);
+
+        if (shouldDecodeRecordedTake)
+        {
+            if (currentLoadedVideoFile != selectedTake->videoPath)
+            {
+                videoDecoder.close();
+                currentLoadedVideoFile = selectedTake->videoPath;
+                if (!videoDecoder.open(juce::File(selectedTake->videoPath)))
+                    currentLoadedVideoFile.clear();
+            }
+
+            if (videoDecoder.getDurationSeconds() > 0.0)
+                pbState.totalDurationSec = videoDecoder.getDurationSeconds();
+
+            if (processor.isProjectSampleValid())
+            {
+                const auto maybeTimeSec = processor.takeSyncManager().calculateVideoTimeSeconds(
+                    processor.currentProjectSample());
+                if (maybeTimeSec.has_value())
+                {
+                    const auto timeSec = *maybeTimeSec;
+                    pbState.currentVideoTimeSec = timeSec;
+                    if (timeSec >= 0.0
+                        && (pbState.totalDurationSec <= 0.0
+                            || timeSec <= pbState.totalDurationSec + 0.1))
+                    {
+                        pbState.isOutOfRange = false;
+                        const auto frame = videoDecoder.decodeFrameAt(timeSec);
+                        if (frame.isValid())
+                            previewComponent.setRecordedFrame(frame);
+                    }
+                    else
+                    {
+                        pbState.isOutOfRange = true;
+                    }
+                }
+                else
+                {
+                    pbState.isOutOfRange = true;
+                }
+            }
+            else
+            {
+                pbState.isOutOfRange = true;
+            }
+        }
+        else
+        {
+            if (currentLoadedVideoFile.isNotEmpty())
+            {
+                videoDecoder.close();
+                currentLoadedVideoFile.clear();
+            }
+            pbState.isOutOfRange = true;
+        }
+    }
+    else
+    {
+        if (currentLoadedVideoFile.isNotEmpty())
+        {
+            videoDecoder.close();
+            currentLoadedVideoFile.clear();
+        }
+        pbState.hasTake = false;
+        pbState.isOutOfRange = true;
+    }
+
+    previewComponent.updatePlaybackState(pbState);
+}
+
+void PluginEditor::updatePreviewLifecycle()
+{
+    const auto viewMode = previewComponent.getViewMode();
+    const auto hasTake = processor.takeSyncManager().getSelectedTake().has_value();
+    const auto wantsLivePreview = viewMode == VideoViewMode::liveCamera
+                                  || (viewMode == VideoViewMode::autoSync
+                                      && (processor.isArmed()
+                                          || processor.isDawRecording()
+                                          || !hasTake));
+
+    if (!previewLifecycleInitialized || previewStreamingEnabled != wantsLivePreview)
+    {
+        previewLifecycleInitialized = true;
+        previewStreamingEnabled = wantsLivePreview;
+        processor.setPreviewEnabled(wantsLivePreview);
+    }
+}
+
+void PluginEditor::updateTakeSelector()
+{
+    const auto revision = processor.takeSyncManager().getRevision();
+    if (revision == displayedTakeManagerRevision)
+        return;
+
+    displayedTakeManagerRevision = revision;
+    const auto availableTakes = processor.takeSyncManager().getAvailableTakes();
+    const auto selectedTakeId = processor.takeSyncManager().getSelectedTakeId();
+
+    takeSelector.clear(juce::dontSendNotification);
+    if (availableTakes.empty())
+    {
+        takeSelector.addItem("No recorded takes", 1);
+        takeSelector.setSelectedId(1, juce::dontSendNotification);
+        takeSelector.setEnabled(false);
+        return;
+    }
+
+    auto selectedItem = 0;
+    for (std::size_t index = 0; index < availableTakes.size(); ++index)
+    {
+        const auto& take = availableTakes[index];
+        juce::String displayName = take.takeId;
+        if (displayName.isEmpty())
+            displayName = juce::File(take.videoPath).getFileName();
+
+        if (take.recordStartedAt.isNotEmpty())
+        {
+            // Show brief timestamp e.g. "Take-1 (2026-08-23 15:30)"
+            const auto dateStr = take.recordStartedAt.replace("T", " ").upToFirstOccurrenceOf(".", false, false);
+            displayName += " [" + dateStr + "]";
+        }
+
+        takeSelector.addItem(displayName, static_cast<int>(index) + 1);
+        if (take.takeId == selectedTakeId)
+            selectedItem = static_cast<int>(index) + 1;
+    }
+
+    if (selectedItem == 0)
+    {
+        selectedItem = 1;
+        processor.takeSyncManager().setSelectedTakeId(availableTakes.front().takeId);
+    }
+    takeSelector.setSelectedId(selectedItem, juce::dontSendNotification);
+    takeSelector.setEnabled(true);
 }
 
 void PluginEditor::updateSourceSelector()

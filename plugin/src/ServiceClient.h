@@ -17,6 +17,15 @@
 
 namespace dawvr
 {
+namespace detail
+{
+[[nodiscard]] constexpr bool responseCompletesRequest(protocol::ResponseKind expectedKind,
+                                                      protocol::ResponseKind actualKind) noexcept
+{
+    return actualKind == expectedKind || actualKind == protocol::ResponseKind::error;
+}
+} // namespace detail
+
 enum class ServiceConnectionState
 {
     stopped,
@@ -90,6 +99,7 @@ private:
     struct PendingRequest final
     {
         std::uint64_t requestId{};
+        protocol::ResponseKind expectedKind{ protocol::ResponseKind::error };
         protocol::Response response;
         bool ready{ false };
         juce::WaitableEvent event;

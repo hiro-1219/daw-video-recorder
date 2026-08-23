@@ -7,9 +7,29 @@
 
 namespace dawvr
 {
+enum class VideoViewMode
+{
+    autoSync = 0,
+    recordedTake = 1,
+    liveCamera = 2
+};
+
 class VideoPreviewComponent final : public juce::Component, private juce::Timer
 {
 public:
+    struct PlaybackState final
+    {
+        bool isDawPlaying{ false };
+        bool isDawRecording{ false };
+        bool isArmed{ false };
+        bool isOutOfRange{ false };
+        bool hasTake{ false };
+        juce::String takeLabel;
+        double currentVideoTimeSec{ 0.0 };
+        double totalDurationSec{ 0.0 };
+        std::int64_t currentDawSample{ 0 };
+    };
+
     VideoPreviewComponent();
     ~VideoPreviewComponent() override;
 
@@ -17,32 +37,43 @@ public:
     void resized() override;
     void visibilityChanged() override;
 
-    void updateState(ServiceConnectionState connectionState,
-                     const juce::String& statusText,
-                     bool isArmed,
-                     bool isRecording,
-                     std::int64_t recordingDurationMs);
+    void setViewMode(VideoViewMode mode);
+    [[nodiscard]] VideoViewMode getViewMode() const noexcept { return viewMode; }
 
-    void setFrameData(const ServiceClient::PreviewFrameData& frame);
+    void updateServiceState(ServiceConnectionState connectionState,
+                            const juce::String& statusText,
+                            bool isArmed,
+                            bool isRecording,
+                            std::int64_t recordingDurationMs);
+
+    void updatePlaybackState(const PlaybackState& state);
+
+    void setLiveFrameData(const ServiceClient::PreviewFrameData& frame);
+    void setRecordedFrame(const juce::Image& image);
 
     [[nodiscard]] bool isPreviewStreamingRequested() const noexcept;
 
 private:
     void timerCallback() override;
     void renderPlaceholder(juce::Graphics& g, const juce::Rectangle<float>& targetBounds);
-    void renderOverlay(juce::Graphics& g, const juce::Rectangle<float>& targetBounds);
+    void renderOverlay(juce::Graphics& g, const juce::Rectangle<float>& videoBounds);
+
+    VideoViewMode viewMode{ VideoViewMode::autoSync };
 
     mutable juce::CriticalSection imageLock;
-    juce::Image currentImage;
-    std::uint64_t lastFrameRevision{};
-    std::uint32_t frameWidth{};
-    std::uint32_t height{};
+    juce::Image currentLiveImage;
+    juce::Image currentRecordedImage;
+    std::uint64_t lastLiveFrameRevision{};
+    std::uint32_t liveFrameWidth{};
+    std::uint32_t liveFrameHeight{};
 
     ServiceConnectionState currentConnectionState{ ServiceConnectionState::stopped };
     juce::String currentStatusText;
     bool armed{ false };
     bool recording{ false };
     std::int64_t durationMs{ 0 };
+
+    PlaybackState playbackState;
 
     bool recBlinkState{ true };
     int frameCountForFps{ 0 };

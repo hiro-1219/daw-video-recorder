@@ -14,6 +14,8 @@ juce_add_plugin(DAWVideoRecorderPlugin
     COPY_PLUGIN_AFTER_BUILD FALSE)
 
 target_sources(DAWVideoRecorderPlugin PRIVATE
+    src/MFVideoDecoder.cpp
+    src/MFVideoDecoder.h
     src/PluginEditor.cpp
     src/PluginEditor.h
     src/PluginProcessor.cpp
@@ -23,6 +25,8 @@ target_sources(DAWVideoRecorderPlugin PRIVATE
     src/ServiceClient.cpp
     src/ServiceClient.h
     src/SpscQueue.h
+    src/TakeSyncManager.cpp
+    src/TakeSyncManager.h
     src/TransportSnapshot.h
     src/VideoPreviewComponent.cpp
     src/VideoPreviewComponent.h)
@@ -59,6 +63,10 @@ target_link_libraries(DAWVideoRecorderPlugin
     PRIVATE
         juce::juce_audio_utils
         juce::juce_gui_extra
+        mfplat
+        mfreadwrite
+        mfuuid
+        propsys
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags

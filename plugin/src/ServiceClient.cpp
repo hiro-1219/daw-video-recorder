@@ -95,7 +95,9 @@ void ServiceClient::ReceiverThread::run()
         {
             const juce::ScopedLock lock(client.pendingLock);
             auto it = client.pendingRequests.find(response.requestId);
-            if (it != client.pendingRequests.end())
+            if (it != client.pendingRequests.end()
+                && !it->second->ready
+                && detail::responseCompletesRequest(it->second->expectedKind, response.kind))
             {
                 it->second->response = std::move(response);
                 it->second->ready = true;
@@ -606,6 +608,7 @@ bool ServiceClient::exchange(const protocol::Bytes& message,
 {
     auto req = std::make_shared<PendingRequest>();
     req->requestId = requestId;
+    req->expectedKind = expectedKind;
     {
         const juce::ScopedLock lock(pendingLock);
         pendingRequests[requestId] = req;

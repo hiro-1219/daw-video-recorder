@@ -248,7 +248,7 @@ At 480x270 RGB24, pixel data is 388,800 bytes before Protocol Buffers overhead, 
 
 - `PreviewFrame` bypasses request correlation and updates `currentPreviewFrame`.
 - `RecordingFinalized` updates the finalized-take snapshot and can also satisfy a correlated request when it has a nonzero request ID.
-- Other responses with nonzero request IDs are moved into a matching `PendingRequest` and signal its waitable event.
+- A request is completed only by its expected response kind or by `Error`. Other responses with the same nonzero request ID are dispatched as events without overwriting the pending result. This is required because a transport batch can emit `SessionStateChanged`, `RecordingFinalized`, and `TransportAccepted` with the same request ID.
 
 `ServiceClient::PreviewFrameData` contains:
 
@@ -286,6 +286,8 @@ If presentation work needs a new method or snapshot field, Antigravity creates a
 `PluginProcessor::processBlock` captures a `TransportSnapshot` for each DAW callback and pushes it into a capacity-2048 SPSC queue without waiting. The background client drains up to 64 snapshots per request. `TransportSnapshotBatch` preserves callback sequence numbers and carries sample position, rate, playing/recording/loop/offline flags, and optional musical context.
 
 The Rust session state machine uses the callback monotonic timestamp for recording edges. IPC delivery time is not the recording start time. Prepared capture, encoded GOP buffering, tail holdback, and metadata generation are core behavior and must not be reimplemented or inferred in the GUI.
+
+Successful takes are atomically promoted from `<stem>.mp4.part` to `<stem>.mp4`, then receive `<stem>.sync.json` metadata. The GUI take browser accepts both this current metadata name and the legacy `<stem>.mp4.json` form. A `.part` file is never presented as a finalized take.
 
 The GUI may display state and finalized paths. It does not decide when a take begins or ends.
 

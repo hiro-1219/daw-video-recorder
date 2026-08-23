@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <iostream>
+#include <string_view>
 
 namespace
 {
@@ -17,8 +18,27 @@ std::int64_t monotonicTimeNs() noexcept
 }
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
+    if (argc == 2 && std::string_view(argv[1]) == "--response-routing-only")
+    {
+        using dawvr::detail::responseCompletesRequest;
+        using dawvr::protocol::ResponseKind;
+        if (responseCompletesRequest(ResponseKind::transportAccepted,
+                                     ResponseKind::sessionStateChanged)
+            || responseCompletesRequest(ResponseKind::transportAccepted,
+                                        ResponseKind::recordingFinalized)
+            || !responseCompletesRequest(ResponseKind::transportAccepted,
+                                         ResponseKind::transportAccepted)
+            || !responseCompletesRequest(ResponseKind::transportAccepted, ResponseKind::error))
+        {
+            std::cerr << "Pending-response routing self-test failed\n";
+            return 28;
+        }
+        std::cout << "Pending-response routing self-test passed\n";
+        return 0;
+    }
+
     const auto testProjectRoot = juce::File::getSpecialLocation(juce::File::tempDirectory)
                                      .getNonexistentChildFile("dawvr-ipc-smoke", {}, true);
     if (testProjectRoot.createDirectory().failed())
@@ -102,6 +122,12 @@ int main()
         sharedClient.setSelectedSource(selectedSource);
         armed.store(true, std::memory_order_release);
         sharedArmed.store(true, std::memory_order_release);
+        // Let both clients prepare and populate the encoded GOP buffer before preview traffic
+        // begins sharing the control pipe. This mirrors the GUI flow where source/project
+        // configuration is already settled before the user creates a DAW record edge.
+        juce::Thread::sleep(5000);
+        client.setPreviewEnabled(true);
+        sharedClient.setPreviewEnabled(true);
         juce::Thread::sleep(1000);
     }
 
@@ -142,6 +168,15 @@ int main()
         stopClients();
         return 21;
     }
+    if (client.connectionState() != dawvr::ServiceConnectionState::connected
+        || (exerciseCapture
+            && sharedClient.connectionState() != dawvr::ServiceConnectionState::connected))
+    {
+        std::cerr << "Recording start caused an IPC reconnect: " << client.statusText()
+                  << " / " << sharedClient.statusText() << '\n';
+        stopClients();
+        return 26;
+    }
 
     dawvr::FinalizedTakeInfo firstFinalizedTake;
     dawvr::FinalizedTakeInfo sharedFinalizedTake;
@@ -179,6 +214,14 @@ int main()
                       << " / " << sharedClient.statusText() << '\n';
             stopClients();
             return 7;
+        }
+        if (client.connectionState() != dawvr::ServiceConnectionState::connected
+            || sharedClient.connectionState() != dawvr::ServiceConnectionState::connected)
+        {
+            std::cerr << "Recording finalization caused an IPC reconnect: "
+                      << client.statusText() << " / " << sharedClient.statusText() << '\n';
+            stopClients();
+            return 27;
         }
         firstFinalizedTake = client.latestFinalizedTake();
         sharedFinalizedTake = sharedClient.latestFinalizedTake();
