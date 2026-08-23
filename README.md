@@ -44,6 +44,18 @@
 
 ---
 
+## 開発ツールの担当境界
+
+今後は、録画・OS連携・カメラ取得・DAW同期・IPCなどのコア部分を **Codex**、VST3の表示・レイアウト・JUCE描画を **Antigravity** が主に担当します。
+
+- Codex: `recorder/`、`protocol/`、`PluginProcessor`、`ServiceClient`、`ProtocolCodec`、リアルタイム安全性とテスト
+- Antigravity: `PluginEditor`、`VideoPreviewComponent`、表示専用コンポーネント、スタイルとレイアウト
+- 共有境界: Antigravityは`PluginProcessor`の公開ファサードだけを使用し、Named Pipe、Protocol Buffers、Media Foundationへ直接アクセスしません。
+
+作業開始時は [AGENTS.md](AGENTS.md) と [.agents/README.md](.agents/README.md) を参照してください。実装済みIPC、カメラ列挙、プレビューフレーム形式、スレッド構成、バックプレッシャー、変更手順は [Core-to-GUI IPC and API handoff](docs/IPC_API_HANDOFF.md) にまとめています。
+
+---
+
 ## 動作環境・必要要件
 
 - **OS**: Windows 10 / 11 (64-bit)

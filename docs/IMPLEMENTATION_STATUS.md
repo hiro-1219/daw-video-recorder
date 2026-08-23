@@ -22,6 +22,9 @@ Implemented:
 - atomic JSON synchronization-metadata writer
 - Windows Media Foundation camera enumeration with stable symbolic-link IDs
 - live camera list, selection, and selected-camera state persistence in the VST3 UI
+- bounded 480x270 RGB24 preview generation from YUY2, NV12, RGB24, and RGB32 camera samples
+- inline Protocol Buffers preview delivery over the existing 4 MiB Named Pipe framing
+- asynchronous preview receive, revisioned frame snapshots, JUCE image conversion, aspect-preserving drawing, REC/timecode overlay, and manual preview enable/disable
 - DAW recording-edge connection to a per-session Media Foundation capture pipeline
 - native uncompressed camera input encoded as H.264 in an MP4 container
 - collision-resistant take directories below `<Project Root>/Recordings`
@@ -63,7 +66,8 @@ Not yet implemented:
 - automatic camera sensor-latency calibration
 - configurable holdback duration and handling for IPC stalls longer than the holdback window
 - resolution and frame-rate enumeration in the GUI
-- preview shared memory
+- automatic preview stop/start tied to plug-in editor visibility
+- optional shared-memory preview transport
 - fragmented/recoverable container and interrupted-take recovery
 - real-time 30-minute Studio One synchronization acceptance test
 

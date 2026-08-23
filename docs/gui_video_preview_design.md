@@ -1,6 +1,6 @@
-# GUI & Video Preview アーキテクチャ設計書
+# GUI & Video Preview アーキテクチャ
 
-本ドキュメントは、DAW Video Recorder におけるカメラ映像プレビュー表示およびVST3プラグインGUI刷新の基本設計と実装方針をまとめたものです。
+本ドキュメントは、DAW Video Recorder における実装済みのカメラ映像プレビュー表示とVST3 GUI構成、および未実装の拡張をまとめたものです。IPCの正確なフィールド、スレッド、キュー、バックプレッシャーは [Core-to-GUI IPC and API handoff](IPC_API_HANDOFF.md) を正本とします。
 
 ---
 
@@ -17,26 +17,28 @@ sequenceDiagram
     participant Service as Rust Recording Service
     participant MF as Windows Media Foundation
 
-    Note over GUI,Client: プラグインウィンドウが開く
-    GUI->>Client: startPreviewStream()
+    Note over GUI,Client: Previewが有効でカメラが選択済み
+    GUI->>Client: PluginProcessor::setPreviewEnabled(true)
     Client->>IPC: RequestPreview { instance_id, 480x270, 30fps }
-    IPC->>Service: handle_request_preview()
-    Service->>MF: プレビュー用フレーム分岐 (RGB24/JPEG)
+    IPC->>Service: subscribe_preview()
+    Service->>MF: プレビュー用フレーム分岐 (RGB24)
     
     loop 毎フレーム (15〜30 fps)
         MF-->>Service: 生フレーム取得
-        Service->>Service: リサイズ & エンコード
-        Service->>IPC: PreviewFrame { timestamp, data }
-        IPC->>Client: on_preview_frame_received()
-        Client->>GUI: updatePreviewImage()
+        Service->>Service: RGB24変換 & リサイズ
+        Service->>IPC: PreviewFrame { request_id=0, timestamp, frame_data }
+        IPC->>Client: ReceiverThreadで受信
+        Client->>GUI: revision付きPreviewFrameDataを公開
         GUI->>GUI: Repaint (Letterbox + REC Overlay)
     end
 
-    Note over GUI,Client: プラグインウィンドウが閉じる
-    GUI->>Client: stopPreviewStream()
+    Note over GUI,Client: Previewトグルを無効化
+    GUI->>Client: PluginProcessor::setPreviewEnabled(false)
     Client->>IPC: StopPreview { instance_id }
-    IPC->>Service: handle_stop_preview() (Rust側プレビュー処理休止)
+    IPC->>Service: unsubscribe_preview() (Rust側プレビュー処理休止)
 ```
+
+`RequestPreview`と`StopPreview`は成功時に直接の応答を返しません。`PreviewFrame`は制御メッセージと同じNamed Pipe上へ非同期に送られます。プラグインウィンドウの非表示・破棄と自動連動する停止処理は、現時点では未実装です。
 
 ---
 
@@ -46,9 +48,9 @@ sequenceDiagram
 |---|---|---|
 | **プラグインGUI** | **C++20 / JUCE 7/8 (`juce_gui_basics`, `juce_gui_extra`)** | DAW環境での標準的フレームワーク。AGPLv3適合。スレッド安全なタイマー・アトミック更新機構。 |
 | **映像描画エンジン** | **JUCE 2D Graphics Engine (`juce::Graphics`, `juce::Image`)** | GPUコンテキスト（OpenGL/DirectX）の共有競合やホストDAWとの衝突を回避し、CPU負荷を最小化。 |
-| **プレビューIPC伝送** | **Named Pipe Protocol拡張 (`daw_video_recorder.proto`)** | 第1段階としてProtocol Buffers形式で低解像度プレビューフレーム（RGB24 / JPEG）を伝送。プロトコルの統一性・ポータビリティが高い。 |
-| **高効率拡張 (Phase 5.5+)** | **Windows Named Shared Memory (`CreateFileMappingW`)** | 大画面・高fpsでのゼロコピー伝送オプショナル対応。 |
-| **サービス側画像処理** | **Rust (`image` または Media Foundation RGB/NV12 変換)** | MIT/Apache-2.0ライセンス互換。安全かつ高速なメモリ操作。 |
+| **プレビューIPC伝送** | **Named Pipe + Protocol Buffers `PreviewFrame`** | 480x270・30fpsのRGB24を制御メッセージと同じ接続で非同期伝送。現在の上限は4 MiB。 |
+| **高効率拡張（未実装）** | **Windows Named Shared Memory候補** | 大画面・高fps向けの将来案。現在のプロトコルには含まれない。 |
+| **サービス側画像処理** | **Rust + Media Foundation変換** | YUY2、NV12、RGB24、RGB32をRGB24へ変換し、要求サイズへ縮小。 |
 
 ---
 
@@ -83,7 +85,8 @@ sequenceDiagram
    - レターボックス/ピラーボックスアスペクト比維持描画
    - 状態バナー（Disconnected, Idle, Preparing, Armed, Recording, Finalizing, Error）
    - 録画中点滅RECマーク ＆ タイムコードオーバーレイ（`00:00:00.000`）
-   - 非表示時自動ストリーム停止（`visibilityChanged` による省電力化）
+   - revisionが変化したフレームだけを画像へ変換
+   - 非表示時自動ストリーム停止は今後の実装項目
 2. **`ControlSidebarComponent`**:
    - 大きく押しやすいRecord Armトグルボタン（状態に応じたカラーチェンジ）
    - カメラ選択（共有状態バッジ付き）
@@ -96,16 +99,20 @@ sequenceDiagram
 
 ---
 
-## 4. 実装ステップ計画
+## 4. 実装状況と次の拡張
 
-1. **Step 1: プロトコル拡張**:
-   - [daw_video_recorder.proto](file:///C:/Users/hiro2/Documents/repo/daw-video-recorder/protocol/daw_video_recorder.proto) に `RequestPreview`, `StopPreview`, `PreviewFrame` を追加。
-   - C++側の [ProtocolCodec.h](file:///C:/Users/hiro2/Documents/repo/daw-video-recorder/plugin/src/ProtocolCodec.h) と Rust側の [protocol.rs](file:///C:/Users/hiro2/Documents/repo/daw-video-recorder/recorder/src/protocol.rs) を更新。
-2. **Step 2: Rust録画サービスにおけるプレビュー生成と配信**:
-   - キャプチャパイプラインからプレビュー用のダウンサンプリングフレームを取得し、IPCクライアントへ非同期配信。
-3. **Step 3: VST3プラグイン `VideoPreviewComponent` の実装**:
-   - 受信したプレビューフレームを `juce::Image` へデコードし、ダブルバッファで描画。
-4. **Step 4: PluginEditor のレイアウト刷新**:
-   - 2ペインUIレイアウトの構築、コントロールの再配置、フォルダオープン機能の実装。
-5. **Step 5: 動作検証と負荷測定**:
-   - DAW録音中のプレビュー描画がオーディオ処理に影響を与えないことの確認。
+実装済み:
+
+1. `RequestPreview`、`StopPreview`、`PreviewFrame`のProtocol v2定義とRust/C++ codec。
+2. Rustでの形式変換、縮小、fps制限、容量2の加入者キューと容量4の接続キュー。
+3. Named Pipe上のinline preview、C++ receiver thread、revision付きフレームスナップショット。
+4. JUCE画像変換、アスペクト比維持、REC表示、経過時間、fps表示、手動Previewトグル。
+
+未実装または要検証:
+
+1. エディタの表示・非表示・破棄に確実に連動する`RequestPreview`／`StopPreview`。
+2. カメラ対応解像度・フレームレートの列挙と選択。
+3. preview drop／遅延メトリクスとDAW録音中の継続的な負荷受入試験。
+4. 必要性を測定したうえでの共有メモリ方式とNamed Pipeへのフォールバック。
+
+GUI作業はAntigravity、上記のサービス・IPC・`PluginProcessor`ファサード変更はCodexが担当します。境界をまたぐ変更は `.agents/handoffs/` を使用します。
