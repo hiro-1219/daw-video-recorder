@@ -17,7 +17,7 @@ use crate::{
     session::SessionStatus,
 };
 
-const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum IpcError {

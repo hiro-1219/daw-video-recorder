@@ -500,29 +500,76 @@ void ServiceClient::pollIncomingMessages()
     }
 }
 
+bool ServiceClient::readExact(void* dest, int bytesToRead, int timeoutMs)
+{
+    auto* buffer = static_cast<char*>(dest);
+    int totalRead = 0;
+    const auto startTime = juce::Time::getMillisecondCounter();
+
+    while (totalRead < bytesToRead)
+    {
+        if (threadShouldExit())
+            return false;
+
+        const auto elapsed = static_cast<int>(juce::Time::getMillisecondCounter() - startTime);
+        if (elapsed >= timeoutMs && timeoutMs > 0)
+            return false;
+
+        const auto remainingTimeout = (timeoutMs > 0) ? std::max(1, timeoutMs - elapsed) : 0;
+        const auto bytesRemaining = bytesToRead - totalRead;
+        const auto numRead = pipe.read(buffer + totalRead, bytesRemaining, remainingTimeout);
+        if (numRead <= 0)
+            return false;
+        totalRead += numRead;
+    }
+    return totalRead == bytesToRead;
+}
+
+bool ServiceClient::writeExact(const void* src, int bytesToWrite, int timeoutMs)
+{
+    const auto* buffer = static_cast<const char*>(src);
+    int totalWritten = 0;
+    const auto startTime = juce::Time::getMillisecondCounter();
+
+    while (totalWritten < bytesToWrite)
+    {
+        if (threadShouldExit())
+            return false;
+
+        const auto elapsed = static_cast<int>(juce::Time::getMillisecondCounter() - startTime);
+        if (elapsed >= timeoutMs && timeoutMs > 0)
+            return false;
+
+        const auto remainingTimeout = (timeoutMs > 0) ? std::max(1, timeoutMs - elapsed) : 0;
+        const auto bytesRemaining = bytesToWrite - totalWritten;
+        const auto numWritten = pipe.write(buffer + totalWritten, bytesRemaining, remainingTimeout);
+        if (numWritten <= 0)
+            return false;
+        totalWritten += numWritten;
+    }
+    return totalWritten == bytesToWrite;
+}
+
 bool ServiceClient::sendMessage(const protocol::Bytes& message)
 {
     if (message.size() > maximumMessageBytes)
         return false;
 
     const auto length = static_cast<std::uint32_t>(message.size());
-    const std::array<std::uint8_t, 4> header {
-        static_cast<std::uint8_t>(length & 0xffU),
-        static_cast<std::uint8_t>((length >> 8U) & 0xffU),
-        static_cast<std::uint8_t>((length >> 16U) & 0xffU),
-        static_cast<std::uint8_t>((length >> 24U) & 0xffU)
-    };
-    return pipe.write(header.data(), static_cast<int>(header.size()), ioTimeoutMilliseconds)
-               == static_cast<int>(header.size())
-           && pipe.write(message.data(), static_cast<int>(message.size()), ioTimeoutMilliseconds)
-                  == static_cast<int>(message.size());
+    std::vector<std::uint8_t> packet(4 + message.size());
+    packet[0] = static_cast<std::uint8_t>(length & 0xffU);
+    packet[1] = static_cast<std::uint8_t>((length >> 8U) & 0xffU);
+    packet[2] = static_cast<std::uint8_t>((length >> 16U) & 0xffU);
+    packet[3] = static_cast<std::uint8_t>((length >> 24U) & 0xffU);
+    std::memcpy(packet.data() + 4, message.data(), message.size());
+
+    return writeExact(packet.data(), static_cast<int>(packet.size()), ioTimeoutMilliseconds);
 }
 
 bool ServiceClient::receiveResponse(protocol::Response& response, int timeoutMilliseconds)
 {
     std::array<std::uint8_t, 4> header{};
-    if (pipe.read(header.data(), static_cast<int>(header.size()), timeoutMilliseconds)
-        != static_cast<int>(header.size()))
+    if (!readExact(header.data(), static_cast<int>(header.size()), timeoutMilliseconds))
         return false;
 
     const auto length = static_cast<std::uint32_t>(header[0])
@@ -533,8 +580,7 @@ bool ServiceClient::receiveResponse(protocol::Response& response, int timeoutMil
         return false;
 
     protocol::Bytes payload(length);
-    if (pipe.read(payload.data(), static_cast<int>(payload.size()), ioTimeoutMilliseconds)
-        != static_cast<int>(payload.size()))
+    if (!readExact(payload.data(), static_cast<int>(payload.size()), ioTimeoutMilliseconds))
         return false;
     return protocol::decodeResponse(payload, response);
 }

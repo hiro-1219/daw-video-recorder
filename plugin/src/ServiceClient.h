@@ -8,6 +8,7 @@
 #include <juce_core/juce_core.h>
 
 #include <atomic>
+#include <cstdint>
 #include <limits>
 #include <string>
 #include <vector>
@@ -43,12 +44,13 @@ public:
         std::uint64_t revision{};
     };
 
-    ServiceClient(SpscQueue<TransportSnapshot, 2048U>& queueToDrain,
-                  std::atomic<bool>& recordArmState);
+    explicit ServiceClient(SpscQueue<TransportSnapshot, 2048U>& transportQueue,
+                           std::atomic<bool>& recordArmState);
     ~ServiceClient() override;
 
     void start();
     void stop();
+
     void setIdentity(juce::String persistentInstanceId, juce::String instanceLabel);
     void setProjectRoot(juce::String projectRoot);
     void setSelectedSource(juce::String sourceId);
@@ -77,6 +79,8 @@ private:
     bool refreshSources();
     bool sendTransportBatch();
     void pollIncomingMessages();
+    bool readExact(void* dest, int bytesToRead, int timeoutMs);
+    bool writeExact(const void* src, int bytesToWrite, int timeoutMs);
     bool sendMessage(const protocol::Bytes& message);
     bool receiveResponse(protocol::Response& response, int timeoutMilliseconds);
     bool exchange(const protocol::Bytes& message,
@@ -115,24 +119,27 @@ private:
     mutable juce::CriticalSection previewLock;
     PreviewFrameData currentPreviewFrame;
 
+    std::atomic<ServiceConnectionState> currentState { ServiceConnectionState::stopped };
     mutable juce::CriticalSection statusLock;
     juce::String currentStatus { "Stopped" };
-    std::atomic<ServiceConnectionState> currentState { ServiceConnectionState::stopped };
+
+    std::atomic<std::uint64_t> consumedCount{};
+    std::atomic<std::uint64_t> transmittedCount{};
+    std::atomic<std::uint64_t> receivedSourceListRevision{};
+    std::uint64_t requestSequence{};
 
     std::string runtimeInstanceId;
-    std::uint64_t appliedConfigurationRevision{};
-    bool lastSentArmed{};
-    bool lastSentPreviewEnabled{};
     std::string lastSentProjectRoot;
     std::string lastSentSourceId;
     std::uint32_t lastSentBitRate{};
     std::uint32_t lastSentGopDurationMs{};
     bool lastSentPreferHardware{};
     std::int64_t lastSentSyncOffsetNs { std::numeric_limits<std::int64_t>::min() };
+    bool lastSentArmed{};
+    bool lastSentPreviewEnabled{};
+    std::uint64_t appliedConfigurationRevision{};
     std::int64_t nextSourceRefreshTimeMs{};
-    std::uint64_t requestSequence{};
-    std::atomic<std::uint64_t> consumedCount{};
-    std::atomic<std::uint64_t> transmittedCount{};
-    std::atomic<std::uint64_t> receivedSourceListRevision{};
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ServiceClient)
 };
 } // namespace dawvr
