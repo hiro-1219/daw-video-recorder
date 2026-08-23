@@ -64,6 +64,15 @@ void appendString(Bytes& destination, std::uint32_t field, std::string_view valu
     destination.insert(destination.end(), value.begin(), value.end());
 }
 
+void appendBytes(Bytes& destination, std::uint32_t field, std::span<const std::uint8_t> value)
+{
+    if (value.empty())
+        return;
+    appendKey(destination, field, lengthDelimited);
+    appendVarint(destination, value.size());
+    destination.insert(destination.end(), value.begin(), value.end());
+}
+
 void appendMessage(Bytes& destination, std::uint32_t field, const Bytes& value)
 {
     appendKey(destination, field, lengthDelimited);
@@ -230,6 +239,7 @@ bool decodeNested(std::uint32_t payloadField,
         case 35: response.kind = ResponseKind::error; break;
         case 36: response.kind = ResponseKind::heartbeatAck; break;
         case 37: response.kind = ResponseKind::transportAccepted; break;
+        case 38: response.kind = ResponseKind::previewFrame; break;
         default: response.kind = ResponseKind::unknown; break;
     }
 
@@ -257,39 +267,39 @@ bool decodeNested(std::uint32_t payloadField,
 
         std::uint64_t number{};
         std::span<const std::uint8_t> bytes;
-        const auto isString = wire == lengthDelimited && reader.readBytes(bytes);
+        const auto isStringOrBytes = wire == lengthDelimited && reader.readBytes(bytes);
         const auto isNumber = wire == varint && reader.readVarint(number);
-        if (!isString && !isNumber)
+        if (!isStringOrBytes && !isNumber)
             return false;
 
         if (response.kind == ResponseKind::helloAck)
         {
             if (field == 1U && isNumber) response.selectedVersion = static_cast<std::uint32_t>(number);
-            if (field == 2U && isString) response.serviceVersion = toString(bytes);
+            if (field == 2U && isStringOrBytes) response.serviceVersion = toString(bytes);
         }
         else if (response.kind == ResponseKind::instanceRegistered)
         {
-            if (field == 1U && isString) response.persistentInstanceId = toString(bytes);
-            if (field == 2U && isString) response.runtimeInstanceId = toString(bytes);
+            if (field == 1U && isStringOrBytes) response.persistentInstanceId = toString(bytes);
+            if (field == 2U && isStringOrBytes) response.runtimeInstanceId = toString(bytes);
         }
         else if (response.kind == ResponseKind::sessionStateChanged)
         {
-            if (field == 1U && isString) response.runtimeInstanceId = toString(bytes);
+            if (field == 1U && isStringOrBytes) response.runtimeInstanceId = toString(bytes);
             if (field == 2U && isNumber) response.sessionState = static_cast<std::int32_t>(number);
-            if (field == 3U && isString) response.message = toString(bytes);
+            if (field == 3U && isStringOrBytes) response.message = toString(bytes);
         }
         else if (response.kind == ResponseKind::error)
         {
-            if (field == 1U && isString) response.errorCode = toString(bytes);
-            if (field == 2U && isString) response.message = toString(bytes);
-            if (field == 3U && isString) response.runtimeInstanceId = toString(bytes);
+            if (field == 1U && isStringOrBytes) response.errorCode = toString(bytes);
+            if (field == 2U && isStringOrBytes) response.message = toString(bytes);
+            if (field == 3U && isStringOrBytes) response.runtimeInstanceId = toString(bytes);
         }
         else if (response.kind == ResponseKind::recordingFinalized)
         {
-            if (field == 1U && isString) response.runtimeInstanceId = toString(bytes);
-            if (field == 2U && isString) response.takeId = toString(bytes);
-            if (field == 3U && isString) response.videoPath = toString(bytes);
-            if (field == 4U && isString) response.metadataPath = toString(bytes);
+            if (field == 1U && isStringOrBytes) response.runtimeInstanceId = toString(bytes);
+            if (field == 2U && isStringOrBytes) response.takeId = toString(bytes);
+            if (field == 3U && isStringOrBytes) response.videoPath = toString(bytes);
+            if (field == 4U && isStringOrBytes) response.metadataPath = toString(bytes);
         }
         else if (response.kind == ResponseKind::heartbeatAck && field == 1U && isNumber)
         {
@@ -297,8 +307,17 @@ bool decodeNested(std::uint32_t payloadField,
         }
         else if (response.kind == ResponseKind::transportAccepted)
         {
-            if (field == 1U && isString) response.runtimeInstanceId = toString(bytes);
+            if (field == 1U && isStringOrBytes) response.runtimeInstanceId = toString(bytes);
             if (field == 2U && isNumber) response.sequenceNumber = number;
+        }
+        else if (response.kind == ResponseKind::previewFrame)
+        {
+            if (field == 1U && isStringOrBytes) response.runtimeInstanceId = toString(bytes);
+            if (field == 2U && isNumber) response.width = static_cast<std::uint32_t>(number);
+            if (field == 3U && isNumber) response.height = static_cast<std::uint32_t>(number);
+            if (field == 4U && isStringOrBytes) response.format = toString(bytes);
+            if (field == 5U && isStringOrBytes) response.frameData.assign(bytes.begin(), bytes.end());
+            if (field == 6U && isNumber) response.timestampNs = static_cast<std::int64_t>(number);
         }
     }
     return response.kind != ResponseKind::unknown;
@@ -386,6 +405,27 @@ Bytes makeSetSyncOffset(std::uint64_t requestId,
     appendString(message, 1, runtimeInstanceId);
     appendSigned(message, 2, offsetNs);
     return makeEnvelope(requestId, 20, message);
+}
+
+Bytes makeRequestPreview(std::uint64_t requestId,
+                         std::string_view runtimeInstanceId,
+                         std::uint32_t width,
+                         std::uint32_t height,
+                         std::uint32_t maxFps)
+{
+    Bytes message;
+    appendString(message, 1, runtimeInstanceId);
+    appendUnsigned(message, 2, width);
+    appendUnsigned(message, 3, height);
+    appendUnsigned(message, 4, maxFps);
+    return makeEnvelope(requestId, 21, message);
+}
+
+Bytes makeStopPreview(std::uint64_t requestId, std::string_view runtimeInstanceId)
+{
+    Bytes message;
+    appendString(message, 1, runtimeInstanceId);
+    return makeEnvelope(requestId, 22, message);
 }
 
 Bytes makeTransportBatch(std::uint64_t requestId,

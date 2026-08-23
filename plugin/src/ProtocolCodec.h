@@ -24,7 +24,8 @@ enum class ResponseKind
     recordingFinalized,
     error,
     heartbeatAck,
-    transportAccepted
+    transportAccepted,
+    previewFrame
 };
 
 struct CameraSource final
@@ -52,6 +53,13 @@ struct Response final
     std::string videoPath;
     std::string metadataPath;
     std::vector<CameraSource> sources;
+
+    // Preview frame fields
+    std::uint32_t width{};
+    std::uint32_t height{};
+    std::string format;
+    std::vector<std::uint8_t> frameData;
+    std::int64_t timestampNs{};
 };
 
 [[nodiscard]] Bytes makeHello(std::uint64_t requestId);
@@ -78,6 +86,13 @@ struct Response final
 [[nodiscard]] Bytes makeSetSyncOffset(std::uint64_t requestId,
                                       std::string_view runtimeInstanceId,
                                       std::int64_t offsetNs);
+[[nodiscard]] Bytes makeRequestPreview(std::uint64_t requestId,
+                                       std::string_view runtimeInstanceId,
+                                       std::uint32_t width,
+                                       std::uint32_t height,
+                                       std::uint32_t maxFps);
+[[nodiscard]] Bytes makeStopPreview(std::uint64_t requestId,
+                                    std::string_view runtimeInstanceId);
 [[nodiscard]] Bytes makeTransportBatch(std::uint64_t requestId,
                                        std::string_view runtimeInstanceId,
                                        std::span<const TransportSnapshot> snapshots);

@@ -252,6 +252,23 @@ async fn handle_envelope(
             };
             state_or_error(request_id, &runtime_id, result)
         }
+        Payload::RequestPreview(request_preview) => {
+            tracing::debug!(
+                runtime_id = %request_preview.runtime_instance_id,
+                width = request_preview.width,
+                height = request_preview.height,
+                max_fps = request_preview.max_fps,
+                "preview stream requested"
+            );
+            Vec::new()
+        }
+        Payload::StopPreview(stop_preview) => {
+            tracing::debug!(
+                runtime_id = %stop_preview.runtime_instance_id,
+                "preview stream stopped"
+            );
+            Vec::new()
+        }
         Payload::TransportSnapshotBatch(batch) => {
             let mut responses = Vec::new();
             let mut service = service.lock().await;
@@ -412,6 +429,30 @@ mod tests {
             request_id: 42,
             payload: Some(Payload::Heartbeat(protocol::Heartbeat {
                 sequence_number: 7,
+            })),
+        };
+
+        let write = write_envelope(&mut client, &expected);
+        let read = read_envelope(&mut server);
+        let (write_result, read_result) = tokio::join!(write, read);
+
+        write_result.unwrap();
+        assert_eq!(read_result.unwrap(), Some(expected));
+    }
+
+    #[tokio::test]
+    async fn preview_frame_envelope_round_trips_through_framing() {
+        let (mut client, mut server) = tokio::io::duplex(65_536);
+        let expected = Envelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: 123,
+            payload: Some(Payload::PreviewFrame(protocol::PreviewFrame {
+                runtime_instance_id: "inst-1".into(),
+                width: 480,
+                height: 270,
+                format: "rgb24".into(),
+                frame_data: vec![0x12, 0x34, 0x56, 0x78],
+                timestamp_ns: 987654321,
             })),
         };
 

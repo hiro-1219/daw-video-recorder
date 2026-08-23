@@ -18,6 +18,8 @@ message Envelope {
     Heartbeat heartbeat = 18;
     ConfigureEncodingProfile configure_encoding_profile = 19;
     SetSyncOffset set_sync_offset = 20;
+    RequestPreview request_preview = 21;
+    StopPreview stop_preview = 22;
 
     HelloAck hello_ack = 30;
     InstanceRegistered instance_registered = 31;
@@ -27,6 +29,7 @@ message Envelope {
     Error error = 35;
     HeartbeatAck heartbeat_ack = 36;
     TransportAccepted transport_accepted = 37;
+    PreviewFrame preview_frame = 38;
   }
 }
 
@@ -103,6 +106,17 @@ message SetSyncOffset {
   int64 offset_ns = 2;
 }
 
+message RequestPreview {
+  string runtime_instance_id = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+  uint32 max_fps = 4;
+}
+
+message StopPreview {
+  string runtime_instance_id = 1;
+}
+
 message TransportSnapshot {
   string runtime_instance_id = 1;
   uint64 sequence_number = 2;
@@ -158,6 +172,15 @@ message HeartbeatAck {
 message TransportAccepted {
   string runtime_instance_id = 1;
   uint64 last_sequence_number = 2;
+}
+
+message PreviewFrame {
+  string runtime_instance_id = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+  string format = 4;
+  bytes frame_data = 5;
+  int64 timestamp_ns = 6;
 }
 
 message Error {

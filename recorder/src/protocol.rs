@@ -10,7 +10,7 @@ pub struct Envelope {
     pub request_id: u64,
     #[prost(
         oneof = "envelope::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 30, 31, 32, 33, 34, 35, 36, 37"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 30, 31, 32, 33, 34, 35, 36, 37, 38"
     )]
     pub payload: Option<envelope::Payload>,
 }
@@ -40,6 +40,10 @@ pub mod envelope {
         ConfigureEncodingProfile(super::ConfigureEncodingProfile),
         #[prost(message, tag = "20")]
         SetSyncOffset(super::SetSyncOffset),
+        #[prost(message, tag = "21")]
+        RequestPreview(super::RequestPreview),
+        #[prost(message, tag = "22")]
+        StopPreview(super::StopPreview),
         #[prost(message, tag = "30")]
         HelloAck(super::HelloAck),
         #[prost(message, tag = "31")]
@@ -56,6 +60,8 @@ pub mod envelope {
         HeartbeatAck(super::HeartbeatAck),
         #[prost(message, tag = "37")]
         TransportAccepted(super::TransportAccepted),
+        #[prost(message, tag = "38")]
+        PreviewFrame(super::PreviewFrame),
     }
 }
 
@@ -179,6 +185,24 @@ pub struct SetSyncOffset {
 }
 
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RequestPreview {
+    #[prost(string, tag = "1")]
+    pub runtime_instance_id: String,
+    #[prost(uint32, tag = "2")]
+    pub width: u32,
+    #[prost(uint32, tag = "3")]
+    pub height: u32,
+    #[prost(uint32, tag = "4")]
+    pub max_fps: u32,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct StopPreview {
+    #[prost(string, tag = "1")]
+    pub runtime_instance_id: String,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TransportSnapshot {
     #[prost(string, tag = "1")]
     pub runtime_instance_id: String,
@@ -268,6 +292,22 @@ pub struct TransportAccepted {
     pub runtime_instance_id: String,
     #[prost(uint64, tag = "2")]
     pub last_sequence_number: u64,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PreviewFrame {
+    #[prost(string, tag = "1")]
+    pub runtime_instance_id: String,
+    #[prost(uint32, tag = "2")]
+    pub width: u32,
+    #[prost(uint32, tag = "3")]
+    pub height: u32,
+    #[prost(string, tag = "4")]
+    pub format: String,
+    #[prost(bytes = "vec", tag = "5")]
+    pub frame_data: Vec<u8>,
+    #[prost(int64, tag = "6")]
+    pub timestamp_ns: i64,
 }
 
 #[derive(Clone, PartialEq, ::prost::Message)]
