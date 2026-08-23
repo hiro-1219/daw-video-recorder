@@ -10,7 +10,7 @@ namespace dawvr
 namespace
 {
 constexpr auto pipeName = "daw-video-recorder-v2";
-constexpr auto maximumMessageBytes = 1024U * 1024U;
+constexpr auto maximumMessageBytes = 4U * 1024U * 1024U;
 constexpr auto ioTimeoutMilliseconds = 5000;
 constexpr auto maximumBatchSize = 64U;
 constexpr auto sourceRefreshIntervalMilliseconds = 2000;

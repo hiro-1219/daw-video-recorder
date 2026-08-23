@@ -29,7 +29,7 @@ use windows::{
             MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
             MF_MT_MPEG_SEQUENCE_HEADER, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE,
             MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MF_SINK_WRITER_DISABLE_THROTTLING,
-            MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_ENDOFSTREAM, MF_TRANSFORM_ASYNC,
+            MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_ENDOFSTREAM, MF_TRANSFORM_ASYNC,
             MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION, MFCreateAttributes, MFCreateDeviceSource,
             MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFCreateSinkWriterFromURL,
             MFCreateSourceReaderFromMediaSource, MFMediaType_Video, MFSTARTUP_FULL,
@@ -1283,8 +1283,20 @@ pub(crate) fn run(
     let initialized = (|| {
         let platform = PlatformGuard::initialize()?;
         let source = MediaSourceGuard(create_media_source(source_id)?);
+        let mut attributes: Option<IMFAttributes> = None;
+        unsafe { MFCreateAttributes(&raw mut attributes, 3) }?;
+        let attributes = attributes.ok_or(CaptureError::NoSupportedFormat)?;
+        unsafe {
+            attributes.SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)?;
+            attributes.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)?;
+        }
         let reader =
-            unsafe { MFCreateSourceReaderFromMediaSource(&source.0, None::<&IMFAttributes>) }?;
+            unsafe { MFCreateSourceReaderFromMediaSource(&source.0, Some(&attributes)) }?;
+        let all_streams = u32::from_ne_bytes(MF_SOURCE_READER_ALL_STREAMS.0.to_ne_bytes());
+        unsafe {
+            let _ = reader.SetStreamSelection(all_streams, false);
+            let _ = reader.SetStreamSelection(VIDEO_STREAM, true);
+        }
         let (input_type, format) = choose_input_type(&reader)?;
         unsafe { reader.SetCurrentMediaType(VIDEO_STREAM, None, &input_type) }?;
         let clock = QpcClock::initialize()?;
