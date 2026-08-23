@@ -10,7 +10,9 @@
 #include <atomic>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace dawvr
@@ -72,13 +74,33 @@ public:
     [[nodiscard]] PreviewFrameData latestPreviewFrame() const;
 
 private:
+    class ReceiverThread final : public juce::Thread
+    {
+    public:
+        explicit ReceiverThread(ServiceClient& owner);
+        ~ReceiverThread() override;
+        void run() override;
+
+    private:
+        ServiceClient& client;
+    };
+
+    friend class ReceiverThread;
+
+    struct PendingRequest final
+    {
+        std::uint64_t requestId{};
+        protocol::Response response;
+        bool ready{ false };
+        juce::WaitableEvent event;
+    };
+
     void run() override;
     bool connectAndRegister();
     bool synchronizeConfiguration();
     bool synchronizePreviewState();
     bool refreshSources();
     bool sendTransportBatch();
-    void pollIncomingMessages();
     bool readExact(void* dest, int bytesToRead, int timeoutMs);
     bool writeExact(const void* src, int bytesToWrite, int timeoutMs);
     bool sendMessage(const protocol::Bytes& message);
@@ -96,6 +118,7 @@ private:
     SpscQueue<TransportSnapshot, 2048U>& queue;
     std::atomic<bool>& recordArm;
     juce::NamedPipe pipe;
+    ReceiverThread receiver;
 
     mutable juce::CriticalSection configurationLock;
     juce::String persistentId;
@@ -118,6 +141,9 @@ private:
 
     mutable juce::CriticalSection previewLock;
     PreviewFrameData currentPreviewFrame;
+
+    mutable juce::CriticalSection pendingLock;
+    std::unordered_map<std::uint64_t, std::shared_ptr<PendingRequest>> pendingRequests;
 
     std::atomic<ServiceConnectionState> currentState { ServiceConnectionState::stopped };
     mutable juce::CriticalSection statusLock;

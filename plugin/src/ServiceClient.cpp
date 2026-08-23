@@ -1,77 +1,98 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include "ServiceClient.h"
 
-#include <array>
-#include <memory>
-#include <vector>
+#include <chrono>
+#include <cstring>
+#include <utility>
 
 namespace dawvr
 {
 namespace
 {
-constexpr auto pipeName = "daw-video-recorder-v2";
-constexpr auto maximumMessageBytes = 4U * 1024U * 1024U;
-constexpr auto ioTimeoutMilliseconds = 5000;
-constexpr auto maximumBatchSize = 64U;
-constexpr auto sourceRefreshIntervalMilliseconds = 2000;
+#if JUCE_WINDOWS
+constexpr auto pipeName = R"(\\.\pipe\daw-video-recorder)";
+#else
+constexpr auto pipeName = "/tmp/daw-video-recorder.sock";
+#endif
 
-juce::CriticalSection serviceProcessLock;
-std::unique_ptr<juce::ChildProcess> serviceProcess;
-std::int64_t nextLaunchAttemptTimeMs{};
-
-std::vector<juce::File> serviceExecutableCandidates()
-{
-    std::vector<juce::File> candidates;
-    const auto overridePath = juce::SystemStats::getEnvironmentVariable("DAWVR_SERVICE_PATH", {});
-    if (overridePath.isNotEmpty())
-        candidates.emplace_back(overridePath);
-
-    const auto localAppData = juce::SystemStats::getEnvironmentVariable("LOCALAPPDATA", {});
-    if (localAppData.isNotEmpty())
-        candidates.push_back(juce::File(localAppData)
-                                 .getChildFile("DAW Video Recorder")
-                                 .getChildFile("daw-video-recorder-service.exe"));
-
-    const auto workingDirectory = juce::File::getCurrentWorkingDirectory();
-    candidates.push_back(workingDirectory.getChildFile("target")
-                             .getChildFile("debug")
-                             .getChildFile("daw-video-recorder-service.exe"));
-    candidates.push_back(workingDirectory.getChildFile("target")
-                             .getChildFile("release")
-                             .getChildFile("daw-video-recorder-service.exe"));
-    return candidates;
-}
+constexpr std::size_t maximumBatchSize = 64U;
+constexpr std::size_t maximumMessageBytes = 4 * 1024 * 1024;
+constexpr int ioTimeoutMilliseconds = 3'000;
 
 bool tryLaunchRecordingService()
 {
-    const juce::ScopedLock lock(serviceProcessLock);
-    if (serviceProcess != nullptr && serviceProcess->isRunning())
-        return true;
-
-    const auto now = juce::Time::currentTimeMillis();
-    if (now < nextLaunchAttemptTimeMs)
+#if JUCE_WINDOWS
+    const auto localAppData = juce::File::getSpecialLocation(
+        juce::File::SpecialLocationType::userApplicationDataDirectory);
+    const auto executable = localAppData.getChildFile("DAW Video Recorder")
+                                .getChildFile("daw-video-recorder-service.exe");
+    if (!executable.existsAsFile())
         return false;
-    nextLaunchAttemptTimeMs = now + 2000;
 
-    for (const auto& candidate : serviceExecutableCandidates())
-    {
-        if (!candidate.existsAsFile())
-            continue;
-        auto process = std::make_unique<juce::ChildProcess>();
-        juce::StringArray arguments { candidate.getFullPathName() };
-        if (process->start(arguments, 0))
-        {
-            serviceProcess = std::move(process);
-            return true;
-        }
-    }
+    return executable.startAsProcess();
+#else
     return false;
+#endif
 }
 } // namespace
 
-ServiceClient::ServiceClient(SpscQueue<TransportSnapshot, 2048U>& queueToDrain,
+ServiceClient::ReceiverThread::ReceiverThread(ServiceClient& owner)
+    : Thread("ServiceClientReceiver"), client(owner)
+{
+}
+
+ServiceClient::ReceiverThread::~ReceiverThread()
+{
+    stopThread(2000);
+}
+
+void ServiceClient::ReceiverThread::run()
+{
+    while (!threadShouldExit())
+    {
+        if (!client.pipe.isOpen())
+        {
+            wait(50);
+            continue;
+        }
+
+        protocol::Response response;
+        if (!client.receiveResponse(response, 1000))
+        {
+            if (threadShouldExit() || !client.pipe.isOpen())
+                break;
+            continue;
+        }
+
+        if (response.kind == protocol::ResponseKind::previewFrame)
+        {
+            client.storePreviewFrame(response);
+            continue;
+        }
+
+        if (response.kind == protocol::ResponseKind::recordingFinalized)
+        {
+            client.storeFinalizedTake(response);
+        }
+
+        if (response.requestId != 0U)
+        {
+            const juce::ScopedLock lock(client.pendingLock);
+            auto it = client.pendingRequests.find(response.requestId);
+            if (it != client.pendingRequests.end())
+            {
+                it->second->response = std::move(response);
+                it->second->ready = true;
+                it->second->event.signal();
+            }
+        }
+    }
+}
+
+ServiceClient::ServiceClient(SpscQueue<TransportSnapshot, 2048U>& transportQueue,
                              std::atomic<bool>& recordArmState)
-    : Thread("DAW Video Recorder IPC"), queue(queueToDrain), recordArm(recordArmState)
+    : Thread("ServiceClientWorker"), queue(transportQueue), recordArm(recordArmState),
+      receiver(*this)
 {
 }
 
@@ -83,35 +104,31 @@ ServiceClient::~ServiceClient()
 void ServiceClient::start()
 {
     if (!isThreadRunning())
-        startThread(juce::Thread::Priority::normal);
+        startThread();
 }
 
 void ServiceClient::stop()
 {
     signalThreadShouldExit();
-    pipe.close();
+    receiver.signalThreadShouldExit();
     notify();
     stopThread(2000);
-    setStatus(ServiceConnectionState::stopped, "Stopped");
+    receiver.stopThread(2000);
+    disconnect();
 }
 
 void ServiceClient::setIdentity(juce::String persistentInstanceId, juce::String instanceLabel)
 {
     const juce::ScopedLock lock(configurationLock);
-    if (persistentId == persistentInstanceId && label == instanceLabel)
-        return;
     persistentId = std::move(persistentInstanceId);
     label = std::move(instanceLabel);
     configurationRevision.fetch_add(1U, std::memory_order_release);
-    pipe.close();
     notify();
 }
 
 void ServiceClient::setProjectRoot(juce::String projectRoot)
 {
     const juce::ScopedLock lock(configurationLock);
-    if (configuredProjectRoot == projectRoot)
-        return;
     configuredProjectRoot = std::move(projectRoot);
     configurationRevision.fetch_add(1U, std::memory_order_release);
     notify();
@@ -120,21 +137,16 @@ void ServiceClient::setProjectRoot(juce::String projectRoot)
 void ServiceClient::setSelectedSource(juce::String sourceId)
 {
     const juce::ScopedLock lock(configurationLock);
-    if (configuredSourceId == sourceId)
-        return;
     configuredSourceId = std::move(sourceId);
     configurationRevision.fetch_add(1U, std::memory_order_release);
     notify();
 }
 
 void ServiceClient::setEncodingProfile(std::uint32_t bitRate,
-                                       std::uint32_t gopDurationMs,
-                                       bool preferHardware)
+                                      std::uint32_t gopDurationMs,
+                                      bool preferHardware)
 {
     const juce::ScopedLock lock(configurationLock);
-    if (configuredBitRate == bitRate && configuredGopDurationMs == gopDurationMs
-        && configuredPreferHardware == preferHardware)
-        return;
     configuredBitRate = bitRate;
     configuredGopDurationMs = gopDurationMs;
     configuredPreferHardware = preferHardware;
@@ -145,8 +157,6 @@ void ServiceClient::setEncodingProfile(std::uint32_t bitRate,
 void ServiceClient::setSyncOffsetNs(std::int64_t offsetNs)
 {
     const juce::ScopedLock lock(configurationLock);
-    if (configuredSyncOffsetNs == offsetNs)
-        return;
     configuredSyncOffsetNs = offsetNs;
     configurationRevision.fetch_add(1U, std::memory_order_release);
     notify();
@@ -242,8 +252,7 @@ void ServiceClient::run()
             continue;
         }
 
-        pollIncomingMessages();
-        wait(5);
+        wait(10);
     }
 
     disconnect();
@@ -275,6 +284,8 @@ bool ServiceClient::connectAndRegister()
         return false;
     }
 
+    receiver.startThread();
+
     protocol::Response response;
     auto requestId = nextRequestId();
     if (!exchange(protocol::makeHello(requestId),
@@ -284,7 +295,7 @@ bool ServiceClient::connectAndRegister()
         || response.selectedVersion != protocol::currentProtocolVersion)
     {
         setStatus(ServiceConnectionState::error, "Protocol negotiation failed");
-        pipe.close();
+        disconnect();
         return false;
     }
     const auto serviceVersion = response.serviceVersion;
@@ -298,13 +309,12 @@ bool ServiceClient::connectAndRegister()
                   response)
         || response.runtimeInstanceId.empty())
     {
-        setStatus(ServiceConnectionState::error, "Instance registration failed");
-        pipe.close();
+        setStatus(ServiceConnectionState::error, "Instance registration rejected");
+        disconnect();
         return false;
     }
 
     runtimeInstanceId = response.runtimeInstanceId;
-    appliedConfigurationRevision = 0U;
     lastSentProjectRoot.clear();
     lastSentSourceId.clear();
     lastSentBitRate = 0U;
@@ -313,17 +323,18 @@ bool ServiceClient::connectAndRegister()
     lastSentSyncOffsetNs = std::numeric_limits<std::int64_t>::min();
     lastSentArmed = false;
     lastSentPreviewEnabled = false;
+    appliedConfigurationRevision = 0U;
     nextSourceRefreshTimeMs = 0;
-    sourceRefreshRequested.store(true, std::memory_order_release);
+
     setStatus(ServiceConnectionState::connected,
-              "Connected to recording service " + juce::String(serviceVersion));
+              "Connected to recording service " + juce::String::fromUTF8(serviceVersion.c_str()));
     return true;
 }
 
 bool ServiceClient::refreshSources()
 {
-    protocol::Response response;
     const auto requestId = nextRequestId();
+    protocol::Response response;
     if (!exchange(protocol::makeListSources(requestId),
                   requestId,
                   protocol::ResponseKind::sourceList,
@@ -335,7 +346,7 @@ bool ServiceClient::refreshSources()
         sources = std::move(response.sources);
     }
     receivedSourceListRevision.fetch_add(1U, std::memory_order_release);
-    nextSourceRefreshTimeMs = juce::Time::currentTimeMillis() + sourceRefreshIntervalMilliseconds;
+    nextSourceRefreshTimeMs = juce::Time::currentTimeMillis() + 5'000;
     return true;
 }
 
@@ -343,6 +354,7 @@ bool ServiceClient::synchronizeConfiguration()
 {
     const auto revision = configurationRevision.load(std::memory_order_acquire);
     const auto armed = recordArm.load(std::memory_order_acquire);
+
     juce::String projectRoot;
     juce::String sourceId;
     std::uint32_t bitRate{};
@@ -486,20 +498,6 @@ bool ServiceClient::sendTransportBatch()
     return true;
 }
 
-void ServiceClient::pollIncomingMessages()
-{
-    for (auto i = 0; i < 8; ++i)
-    {
-        protocol::Response response;
-        if (!receiveResponse(response, 1))
-            break;
-        if (response.kind == protocol::ResponseKind::recordingFinalized)
-            storeFinalizedTake(response);
-        else if (response.kind == protocol::ResponseKind::previewFrame)
-            storePreviewFrame(response);
-    }
-}
-
 bool ServiceClient::readExact(void* dest, int bytesToRead, int timeoutMs)
 {
     auto* buffer = static_cast<char*>(dest);
@@ -508,7 +506,7 @@ bool ServiceClient::readExact(void* dest, int bytesToRead, int timeoutMs)
 
     while (totalRead < bytesToRead)
     {
-        if (threadShouldExit())
+        if (threadShouldExit() || receiver.threadShouldExit())
             return false;
 
         const auto elapsed = static_cast<int>(juce::Time::getMillisecondCounter() - startTime);
@@ -590,33 +588,39 @@ bool ServiceClient::exchange(const protocol::Bytes& message,
                              protocol::ResponseKind expectedKind,
                              protocol::Response& response)
 {
+    auto req = std::make_shared<PendingRequest>();
+    req->requestId = requestId;
+    {
+        const juce::ScopedLock lock(pendingLock);
+        pendingRequests[requestId] = req;
+    }
+
     if (!sendMessage(message))
+    {
+        const juce::ScopedLock lock(pendingLock);
+        pendingRequests.erase(requestId);
+        return false;
+    }
+
+    const bool signaled = req->event.wait(ioTimeoutMilliseconds);
+
+    {
+        const juce::ScopedLock lock(pendingLock);
+        pendingRequests.erase(requestId);
+    }
+
+    if (!signaled || !req->ready)
         return false;
 
-    for (auto remainingResponses = 0; remainingResponses < 32; ++remainingResponses)
+    response = std::move(req->response);
+    if (response.kind == protocol::ResponseKind::error)
     {
-        if (!receiveResponse(response, ioTimeoutMilliseconds))
-            return false;
-        if (response.kind == protocol::ResponseKind::error)
-        {
-            setStatus(ServiceConnectionState::error,
-                      juce::String(response.errorCode) + ": " + juce::String(response.message));
-            return false;
-        }
-        if (response.kind == protocol::ResponseKind::recordingFinalized)
-        {
-            storeFinalizedTake(response);
-            continue;
-        }
-        if (response.kind == protocol::ResponseKind::previewFrame)
-        {
-            storePreviewFrame(response);
-            continue;
-        }
-        if (response.requestId == requestId && response.kind == expectedKind)
-            return true;
+        setStatus(ServiceConnectionState::error,
+                  juce::String(response.errorCode) + ": " + juce::String(response.message));
+        return false;
     }
-    return false;
+
+    return response.kind == expectedKind;
 }
 
 void ServiceClient::storeFinalizedTake(const protocol::Response& response)
@@ -641,13 +645,22 @@ void ServiceClient::storePreviewFrame(const protocol::Response& response)
 
 void ServiceClient::disconnect()
 {
+    receiver.stopThread(1000);
+
+    {
+        const juce::ScopedLock lock(pendingLock);
+        for (auto& pair : pendingRequests)
+        {
+            pair.second->event.signal();
+        }
+        pendingRequests.clear();
+    }
+
     if (pipe.isOpen() && !runtimeInstanceId.empty())
         static_cast<void>(sendMessage(protocol::makeUnregisterInstance(nextRequestId(), runtimeInstanceId)));
     pipe.close();
     runtimeInstanceId.clear();
-    if (!threadShouldExit()
-        && currentState.load(std::memory_order_acquire) != ServiceConnectionState::error)
-        setStatus(ServiceConnectionState::connecting, "Disconnected; retrying...");
+    setStatus(ServiceConnectionState::stopped, "Disconnected from recording service");
 }
 
 void ServiceClient::setStatus(ServiceConnectionState state, juce::String text)
