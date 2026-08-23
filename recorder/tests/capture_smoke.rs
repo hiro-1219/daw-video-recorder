@@ -15,6 +15,17 @@ fn monotonic_time_ns() -> i64 {
 }
 
 #[cfg(windows)]
+fn assert_finalized_mp4(path: &std::path::Path) {
+    let bytes = std::fs::read(path).expect("finalized MP4 could not be read");
+    assert!(bytes.len() >= 8, "finalized MP4 is too small");
+    assert_eq!(&bytes[4..8], b"ftyp", "MP4 ftyp box is missing");
+    assert!(
+        bytes.windows(4).any(|window| window == b"moov"),
+        "MP4 moov box is missing after finalization"
+    );
+}
+
+#[cfg(windows)]
 #[test]
 #[ignore = "requires a physical Windows camera"]
 fn records_with_the_shared_encoder_pipeline() {
@@ -45,12 +56,14 @@ fn records_with_the_shared_encoder_pipeline() {
         .expect("software encoder preparation failed");
 
     let directory = tempfile::tempdir().unwrap();
+    let partial_output = directory.path().join("shared-encoder-smoke.mp4.part");
     let output = directory.path().join("shared-encoder-smoke.mp4");
+    let partial_software_output = directory.path().join("software-encoder-smoke.mp4.part");
     let software_output = directory.path().join("software-encoder-smoke.mp4");
     capture
         .begin_recording(
             "capture-smoke".into(),
-            output.clone(),
+            partial_output.clone(),
             0,
             EncodingProfile::default(),
         )
@@ -58,7 +71,7 @@ fn records_with_the_shared_encoder_pipeline() {
     capture
         .begin_recording(
             "capture-smoke-software".into(),
-            software_output.clone(),
+            partial_software_output.clone(),
             0,
             software_profile,
         )
@@ -77,9 +90,16 @@ fn records_with_the_shared_encoder_pipeline() {
         output.display()
     );
     assert!(stats.frame_count > 0);
-    assert!(output.metadata().unwrap().len() > 0);
     assert!(software_stats.frame_count > 0);
-    assert!(software_output.metadata().unwrap().len() > 0);
+    assert_finalized_mp4(&partial_output);
+    assert_finalized_mp4(&partial_software_output);
+    std::fs::rename(&partial_output, &output).expect("MP4 final rename failed");
+    std::fs::rename(&partial_software_output, &software_output)
+        .expect("software MP4 final rename failed");
+    assert_finalized_mp4(&output);
+    assert_finalized_mp4(&software_output);
+    assert!(!partial_output.exists());
+    assert!(!partial_software_output.exists());
     assert_eq!(
         software_stats.encoding_backend,
         daw_video_recorder_service::encoding::EncodingBackend::Software

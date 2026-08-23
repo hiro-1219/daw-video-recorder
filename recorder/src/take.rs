@@ -313,9 +313,13 @@ impl TakeCoordinator {
             stop_snapshot.callback_monotonic_time_ns,
         )?;
 
-        if active.partial_video_path.exists() {
-            fs::rename(&active.partial_video_path, &active.video_path)?;
-        }
+        fs::rename(&active.partial_video_path, &active.video_path)?;
+        tracing::info!(
+            runtime_instance_id,
+            partial_video_path = %active.partial_video_path.display(),
+            video_path = %active.video_path.display(),
+            "finalized MP4 moved into place"
+        );
         let corrected_start_monotonic_time_ns = active
             .start_snapshot
             .callback_monotonic_time_ns
@@ -450,7 +454,10 @@ impl TakeCoordinator {
                 }
                 shared.profile_users.is_empty()
                     && shared.preview_users.is_empty()
-                    && !self.preview_subscriptions.values().any(|src| src == &prepared.source_id)
+                    && !self
+                        .preview_subscriptions
+                        .values()
+                        .any(|src| src == &prepared.source_id)
             });
         if remove_capture {
             self.captures.remove(&prepared.source_id);

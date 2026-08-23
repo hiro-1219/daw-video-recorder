@@ -29,17 +29,20 @@ use windows::{
             MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
             MF_MT_MPEG_SEQUENCE_HEADER, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE,
             MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MF_SINK_WRITER_DISABLE_THROTTLING,
-            MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_ENDOFSTREAM, MF_TRANSFORM_ASYNC,
-            MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION, MFCreateAttributes, MFCreateDeviceSource,
-            MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFCreateSinkWriterFromURL,
-            MFCreateSourceReaderFromMediaSource, MFMediaType_Video, MFSTARTUP_FULL,
-            MFSampleExtension_CleanPoint, MFShutdown, MFStartup, MFT_CATEGORY_VIDEO_ENCODER,
-            MFT_ENUM_FLAG, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
-            MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
-            MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_END_STREAMING,
-            MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_INFO, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
-            MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_I420,
-            MFVideoFormat_IYUV, MFVideoFormat_MJPG, MFVideoFormat_NV12, MFVideoFormat_RGB24, MFVideoFormat_RGB32, MFVideoFormat_YUY2, MFVideoFormat_YV12,
+            MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING,
+            MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_ENDOFSTREAM,
+            MF_TRANSCODE_CONTAINERTYPE, MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
+            MFCreateAttributes, MFCreateDeviceSource, MFCreateMediaType, MFCreateMemoryBuffer,
+            MFCreateSample, MFCreateSinkWriterFromURL, MFCreateSourceReaderFromMediaSource,
+            MFMediaType_Video, MFSTARTUP_FULL, MFSampleExtension_CleanPoint, MFShutdown, MFStartup,
+            MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG, MFT_ENUM_FLAG_HARDWARE,
+            MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_COMMAND_FLUSH,
+            MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
+            MFT_MESSAGE_NOTIFY_END_STREAMING, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_INFO,
+            MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx,
+            MFTranscodeContainerType_MPEG4, MFVideoFormat_H264, MFVideoFormat_I420,
+            MFVideoFormat_IYUV, MFVideoFormat_MJPG, MFVideoFormat_NV12, MFVideoFormat_RGB24,
+            MFVideoFormat_RGB32, MFVideoFormat_YUY2, MFVideoFormat_YV12,
             MFVideoInterlace_Progressive,
         },
         System::{
@@ -232,12 +235,30 @@ impl WriterEndpoint {
 struct ActiveMuxer {
     writer: IMFSinkWriter,
     stream: u32,
+    output_path: std::path::PathBuf,
     first_timestamp: Option<i64>,
     pending_packets: VecDeque<PendingPacket>,
     stats: CaptureStats,
     dropped_packets: Arc<AtomicU64>,
     logical_start_monotonic_time_ns: i64,
     recent_written_timestamps: VecDeque<i64>,
+}
+
+fn writer_operation<T>(
+    result: windows::core::Result<T>,
+    operation: &'static str,
+    output_path: &Path,
+) -> Result<T, CaptureError> {
+    result.map_err(|error| {
+        tracing::error!(
+            operation,
+            output_path = %output_path.display(),
+            hresult = ?error.code(),
+            %error,
+            "Media Foundation MP4 writer operation failed"
+        );
+        error.into()
+    })
 }
 
 struct H264Encoder {
@@ -932,11 +953,12 @@ fn create_muxer(
     let output_url = HSTRING::from(output_path.to_string_lossy().as_ref());
     let mut attributes: Option<IMFAttributes> = None;
     // SAFETY: The output pointer is valid and receives an owned interface.
-    unsafe { MFCreateAttributes(&raw mut attributes, 3) }?;
+    unsafe { MFCreateAttributes(&raw mut attributes, 4) }?;
     let attributes = attributes.ok_or(CaptureError::NoEncoder)?;
     // SAFETY: Attribute values configure the MPEG-4 sink writer behavior.
     unsafe {
         attributes.SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1)?;
+        attributes.SetGUID(&MF_TRANSCODE_CONTAINERTYPE, &MFTranscodeContainerType_MPEG4)?;
         if has_sequence_header {
             attributes.SetUINT32(&MF_MPEG4SINK_SPSPPS_PASSTHROUGH, 1)?;
         }
@@ -945,17 +967,37 @@ fn create_muxer(
             u32::from(backend == EncodingBackend::Hardware),
         )?;
     }
-    let writer = unsafe {
-        MFCreateSinkWriterFromURL(&output_url, None::<&IMFByteStream>, Some(&attributes))
-    }?;
-    let stream = unsafe { writer.AddStream(encoded_type) }?;
-    unsafe {
-        writer.SetInputMediaType(stream, encoded_type, None::<&IMFAttributes>)?;
-        writer.BeginWriting()?;
-    }
+    let writer = writer_operation(
+        unsafe {
+            MFCreateSinkWriterFromURL(&output_url, None::<&IMFByteStream>, Some(&attributes))
+        },
+        "MFCreateSinkWriterFromURL",
+        output_path,
+    )?;
+    let stream = writer_operation(
+        unsafe { writer.AddStream(encoded_type) },
+        "IMFSinkWriter::AddStream",
+        output_path,
+    )?;
+    writer_operation(
+        unsafe { writer.SetInputMediaType(stream, encoded_type, None::<&IMFAttributes>) },
+        "IMFSinkWriter::SetInputMediaType",
+        output_path,
+    )?;
+    writer_operation(
+        unsafe { writer.BeginWriting() },
+        "IMFSinkWriter::BeginWriting",
+        output_path,
+    )?;
+    tracing::info!(
+        output_path = %output_path.display(),
+        container = "mp4",
+        "MP4 muxer initialized"
+    );
     Ok(ActiveMuxer {
         writer,
         stream,
+        output_path: output_path.to_owned(),
         first_timestamp: None,
         pending_packets: VecDeque::new(),
         stats: CaptureStats {
@@ -995,8 +1037,12 @@ fn write_packet(active: &mut ActiveMuxer, pending: PendingPacket) -> Result<(), 
         if packet.clean_point {
             sample.SetUINT32(&MFSampleExtension_CleanPoint, 1)?;
         }
-        active.writer.WriteSample(active.stream, &sample)?;
     }
+    writer_operation(
+        unsafe { active.writer.WriteSample(active.stream, &sample) },
+        "IMFSinkWriter::WriteSample",
+        &active.output_path,
+    )?;
     active
         .stats
         .first_frame_monotonic_time_ns
@@ -1079,7 +1125,18 @@ fn finalize_muxer(
     }
     active.stats.dropped_frame_count = active.dropped_packets.load(Ordering::Relaxed);
     // SAFETY: BeginWriting succeeded and no samples are written after Finalize.
-    unsafe { active.writer.Finalize() }?;
+    writer_operation(
+        unsafe { active.writer.Finalize() },
+        "IMFSinkWriter::Finalize",
+        &active.output_path,
+    )?;
+    tracing::info!(
+        output_path = %active.output_path.display(),
+        frame_count = active.stats.frame_count,
+        dropped_frame_count = active.stats.dropped_frame_count,
+        discarded_tail_frame_count = active.stats.discarded_tail_frame_count,
+        "MP4 muxer finalized"
+    );
     Ok(active.stats)
 }
 
@@ -1167,7 +1224,9 @@ fn writer_thread(args: WriterThreadArgs) {
                 return;
             }
             Ok(WriterMessage::Abort { response }) => {
-                let result = finalize_muxer(muxer, None).map(|_| ()).map_err(|error| error.to_string());
+                let result = finalize_muxer(muxer, None)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string());
                 if let Some(response) = response {
                     let _ = response.send(result);
                 }
@@ -1308,7 +1367,8 @@ impl SharedEncoder {
             if let Some(sps_pps) = extract_sps_pps(&packet.bytes) {
                 self.latest_sequence_header = Arc::from(sps_pps);
             } else if packet.clean_point && !self.latest_sequence_header.is_empty() {
-                let mut with_header = Vec::with_capacity(self.latest_sequence_header.len() + packet.bytes.len());
+                let mut with_header =
+                    Vec::with_capacity(self.latest_sequence_header.len() + packet.bytes.len());
                 with_header.extend_from_slice(&self.latest_sequence_header);
                 with_header.extend_from_slice(&packet.bytes);
                 packet.bytes = Arc::from(with_header);
@@ -1394,8 +1454,7 @@ pub(crate) fn run(
             attributes.SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)?;
             attributes.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)?;
         }
-        let reader =
-            unsafe { MFCreateSourceReaderFromMediaSource(&source.0, Some(&attributes)) }?;
+        let reader = unsafe { MFCreateSourceReaderFromMediaSource(&source.0, Some(&attributes)) }?;
         let all_streams = u32::from_ne_bytes(MF_SOURCE_READER_ALL_STREAMS.0.to_ne_bytes());
         unsafe {
             let _ = reader.SetStreamSelection(all_streams, false);
@@ -1728,6 +1787,33 @@ pub(crate) fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mp4_muxer_accepts_temporary_part_extension() {
+        let _platform = PlatformGuard::initialize().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let output_path = directory.path().join("take.mp4.part");
+        let format = FormatInfo {
+            width: 640,
+            height: 480,
+            frame_rate_numerator: 30,
+            frame_rate_denominator: 1,
+            subtype: MFVideoFormat_NV12,
+        };
+        let encoded_type = make_output_type(format, EncodingProfile::default(), None).unwrap();
+        let muxer = create_muxer(
+            &output_path,
+            &encoded_type,
+            EncodingBackend::Software,
+            Arc::new(AtomicU64::new(0)),
+            0,
+            false,
+        )
+        .unwrap();
+
+        assert!(output_path.is_file());
+        drop(muxer);
+    }
 
     #[test]
     fn gop_buffer_restarts_at_clean_point() {
