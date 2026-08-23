@@ -22,7 +22,7 @@ constexpr int ioTimeoutMilliseconds = 3'000;
 bool tryLaunchRecordingService()
 {
 #if JUCE_WINDOWS
-    const auto localAppDataStr = juce::Process::getEnvironmentVariableValue("LOCALAPPDATA");
+    const auto localAppDataStr = juce::SystemStats::getEnvironmentVariable("LOCALAPPDATA", {});
     if (localAppDataStr.isNotEmpty())
     {
         const auto localExe = juce::File(localAppDataStr)
