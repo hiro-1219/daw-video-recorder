@@ -22,14 +22,24 @@ constexpr int ioTimeoutMilliseconds = 3'000;
 bool tryLaunchRecordingService()
 {
 #if JUCE_WINDOWS
-    const auto localAppData = juce::File::getSpecialLocation(
-        juce::File::SpecialLocationType::userApplicationDataDirectory);
-    const auto executable = localAppData.getChildFile("DAW Video Recorder")
-                                .getChildFile("daw-video-recorder-service.exe");
-    if (!executable.existsAsFile())
-        return false;
+    const auto localAppDataStr = juce::Process::getEnvironmentVariableValue("LOCALAPPDATA");
+    if (localAppDataStr.isNotEmpty())
+    {
+        const auto localExe = juce::File(localAppDataStr)
+                                  .getChildFile("DAW Video Recorder")
+                                  .getChildFile("daw-video-recorder-service.exe");
+        if (localExe.existsAsFile())
+            return localExe.startAsProcess();
+    }
 
-    return executable.startAsProcess();
+    const auto appData = juce::File::getSpecialLocation(
+        juce::File::SpecialLocationType::userApplicationDataDirectory);
+    const auto roamingExe = appData.getChildFile("DAW Video Recorder")
+                               .getChildFile("daw-video-recorder-service.exe");
+    if (roamingExe.existsAsFile())
+        return roamingExe.startAsProcess();
+
+    return false;
 #else
     return false;
 #endif
