@@ -1,23 +1,44 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use std::{
-    collections::HashMap,
-    fs, io,
+    collections::{HashMap, HashSet},
+    fs,
     path::{Path, PathBuf},
+    sync::mpsc::SyncSender,
 };
 
 use chrono::{SecondsFormat, Utc};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    capture::{CaptureError, CaptureHandle},
+    capture::{CaptureError, CaptureHandle, RawPreviewFrame},
     encoding::{EncodingProfile, measure_clock_drift},
-    metadata::{TakeMetadata, write_json},
     protocol::TransportSnapshot,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Error)]
+pub enum TakeError {
+    #[error(transparent)]
+    Capture(#[from] CaptureError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("project root is not a valid directory: {0}")]
+    InvalidProjectRoot(PathBuf),
+    #[error("recordings directory escaped project root")]
+    RecordingsOutsideProject,
+    #[error("take is already active for runtime instance: {0}")]
+    AlreadyActive(String),
+    #[error("take is not active for runtime instance: {0}")]
+    NotActive(String),
+    #[error("runtime instance is not prepared: {0}")]
+    NotPrepared(String),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct TakeContext {
     pub persistent_instance_id: String,
     pub runtime_instance_id: String,
@@ -29,7 +50,7 @@ pub struct TakeContext {
     pub sync_offset_ns: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FinalizedTake {
     pub runtime_instance_id: String,
     pub take_id: String,
@@ -37,24 +58,43 @@ pub struct FinalizedTake {
     pub metadata_path: PathBuf,
 }
 
-#[derive(Debug, Error)]
-pub enum TakeError {
-    #[error("recording is already active for runtime instance: {0}")]
-    AlreadyActive(String),
-    #[error("no recording is active for runtime instance: {0}")]
-    NotActive(String),
-    #[error("camera capture is not prepared for runtime instance: {0}")]
-    NotPrepared(String),
-    #[error("prepared camera does not match the selected source")]
-    PreparedSourceMismatch,
-    #[error("project root does not exist or cannot be resolved: {0}")]
-    InvalidProjectRoot(PathBuf),
-    #[error("Recordings directory resolved outside the project root")]
-    RecordingsOutsideProject,
-    #[error(transparent)]
-    Capture(#[from] CaptureError),
-    #[error(transparent)]
-    Io(#[from] io::Error),
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TakeMetadata {
+    pub schema_version: u32,
+    pub take_id: String,
+    pub session_id: String,
+    pub persistent_instance_id: String,
+    pub runtime_instance_id: String,
+    pub instance_label: String,
+    pub source_id: String,
+    pub source_display_name: String,
+    pub encoding_profile: String,
+    pub encoding_backend: String,
+    pub output_video_path: String,
+    pub record_started_at: String,
+    pub record_stopped_at: String,
+    pub start_project_sample: Option<i64>,
+    pub end_project_sample: Option<i64>,
+    pub sample_rate: f64,
+    pub start_host_time_ns: Option<i64>,
+    pub start_monotonic_time_ns: i64,
+    pub first_frame_monotonic_time_ns: Option<i64>,
+    pub sync_offset_ns: i64,
+    pub configured_sync_offset_ns: i64,
+    pub last_frame_monotonic_time_ns: Option<i64>,
+    pub end_sync_offset_ns: Option<i64>,
+    pub frame_count: u64,
+    pub dropped_frame_count: u64,
+    pub buffered_frame_count: u64,
+    pub discarded_tail_frame_count: u64,
+    pub stop_holdback_exceeded: bool,
+    pub clock_drift_duration_ns: Option<i64>,
+    pub clock_drift_ns: Option<i64>,
+    pub clock_drift_ppm: Option<f64>,
+    pub clock_drift_start_frame_monotonic_time_ns: Option<i64>,
+    pub clock_drift_end_frame_monotonic_time_ns: Option<i64>,
+    pub warnings: Vec<String>,
+    pub finalization_status: String,
 }
 
 #[derive(Debug)]
@@ -78,6 +118,7 @@ struct PreparedCapture {
 struct SharedCapture {
     capture: CaptureHandle,
     profile_users: HashMap<EncodingProfile, usize>,
+    preview_users: HashSet<String>,
 }
 
 #[derive(Debug, Default)]
@@ -85,6 +126,7 @@ pub struct TakeCoordinator {
     prepared: HashMap<String, PreparedCapture>,
     captures: HashMap<String, SharedCapture>,
     active: HashMap<String, ActiveTake>,
+    preview_subscriptions: HashMap<String, String>,
 }
 
 impl TakeCoordinator {
@@ -115,6 +157,7 @@ impl TakeCoordinator {
                 SharedCapture {
                     capture,
                     profile_users: HashMap::new(),
+                    preview_users: HashSet::new(),
                 },
             );
         }
@@ -142,6 +185,56 @@ impl TakeCoordinator {
         Ok(())
     }
 
+    pub fn subscribe_preview(
+        &mut self,
+        runtime_instance_id: &str,
+        source_id: &str,
+        target_width: u32,
+        target_height: u32,
+        max_fps: u32,
+        sender: SyncSender<RawPreviewFrame>,
+    ) -> Result<(), TakeError> {
+        self.unsubscribe_preview(runtime_instance_id);
+        if !self.captures.contains_key(source_id) {
+            let capture = CaptureHandle::prepare(source_id.to_owned())?;
+            self.captures.insert(
+                source_id.to_owned(),
+                SharedCapture {
+                    capture,
+                    profile_users: HashMap::new(),
+                    preview_users: HashSet::new(),
+                },
+            );
+        }
+        let shared = self
+            .captures
+            .get_mut(source_id)
+            .expect("the shared capture exists after preparation");
+        shared.capture.subscribe_preview(
+            runtime_instance_id.to_owned(),
+            target_width,
+            target_height,
+            max_fps,
+            sender,
+        )?;
+        shared.preview_users.insert(runtime_instance_id.to_owned());
+        self.preview_subscriptions
+            .insert(runtime_instance_id.to_owned(), source_id.to_owned());
+        Ok(())
+    }
+
+    pub fn unsubscribe_preview(&mut self, runtime_instance_id: &str) {
+        if let Some(source_id) = self.preview_subscriptions.remove(runtime_instance_id) {
+            if let Some(shared) = self.captures.get_mut(&source_id) {
+                let _ = shared.capture.unsubscribe_preview(runtime_instance_id);
+                shared.preview_users.remove(runtime_instance_id);
+                if shared.profile_users.is_empty() && shared.preview_users.is_empty() {
+                    self.captures.remove(&source_id);
+                }
+            }
+        }
+    }
+
     pub fn unprepare(&mut self, runtime_instance_id: &str) {
         if !self.active.contains_key(runtime_instance_id) {
             self.release_prepared(runtime_instance_id);
@@ -151,65 +244,49 @@ impl TakeCoordinator {
     pub fn start(
         &mut self,
         context: TakeContext,
-        snapshot: TransportSnapshot,
+        start_snapshot: TransportSnapshot,
     ) -> Result<(), TakeError> {
-        if self.active.contains_key(&context.runtime_instance_id) {
-            return Err(TakeError::AlreadyActive(context.runtime_instance_id));
-        }
-        let prepared = self
-            .prepared
-            .get(&context.runtime_instance_id)
-            .ok_or_else(|| TakeError::NotPrepared(context.runtime_instance_id.clone()))?;
-        if prepared.source_id != context.source_id {
-            return Err(TakeError::PreparedSourceMismatch);
-        }
-        if prepared.encoding_profile != context.encoding_profile {
-            return Err(TakeError::PreparedSourceMismatch);
+        let runtime_instance_id = context.runtime_instance_id.clone();
+        if self.active.contains_key(&runtime_instance_id) {
+            return Err(TakeError::AlreadyActive(runtime_instance_id));
         }
 
-        let recordings_root = prepare_recordings_root(&context.project_root)?;
-        let now = Utc::now();
-        let timestamp = now.format("%Y%m%dT%H%M%S%.3fZ").to_string();
-        let take_id = format!("{timestamp}-{}", Uuid::new_v4().simple());
-        let label = safe_path_component(&context.instance_label);
-        let take_directory = recordings_root.join(format!("{label}_{take_id}"));
-        fs::create_dir(&take_directory)?;
-
-        let base_name = format!("{label}_{take_id}");
-        let partial_video_path = take_directory.join(format!("{base_name}.partial.mp4"));
-        let video_path = take_directory.join(format!("{base_name}.mp4"));
-        let metadata_path = take_directory.join(format!("{base_name}.sync.json"));
-        let capture = &self
-            .captures
-            .get(&context.source_id)
-            .ok_or_else(|| TakeError::NotPrepared(context.runtime_instance_id.clone()))?
-            .capture;
-        if let Err(error) = capture.begin_recording(
-            context.runtime_instance_id.clone(),
-            partial_video_path.clone(),
-            snapshot
-                .callback_monotonic_time_ns
-                .saturating_add(context.sync_offset_ns),
+        self.prepare(
+            &runtime_instance_id,
+            &context.source_id,
             context.encoding_profile,
-        ) {
-            let _ = fs::remove_dir(&take_directory);
-            return Err(error.into());
-        }
-
-        tracing::info!(
-            runtime_instance_id = %context.runtime_instance_id,
-            take_id,
-            path = %partial_video_path.display(),
-            "recording take started"
+        )?;
+        let recordings_root = prepare_recordings_root(&context.project_root)?;
+        let take_id = format!("take-{}", Uuid::new_v4());
+        let video_name = format!(
+            "{}-{}.mp4",
+            safe_path_component(&context.instance_label),
+            take_id
         );
+        let partial_video_name = format!("{video_name}.part");
+        let metadata_name = format!("{video_name}.json");
+        let partial_video_path = recordings_root.join(partial_video_name);
+        let video_path = recordings_root.join(video_name);
+        let metadata_path = recordings_root.join(metadata_name);
+
+        let shared = self
+            .captures
+            .get_mut(&context.source_id)
+            .ok_or_else(|| TakeError::NotPrepared(runtime_instance_id.clone()))?;
+        shared.capture.begin_recording(
+            runtime_instance_id.clone(),
+            partial_video_path.clone(),
+            start_snapshot.callback_monotonic_time_ns,
+            context.encoding_profile,
+        )?;
 
         self.active.insert(
-            context.runtime_instance_id.clone(),
+            runtime_instance_id,
             ActiveTake {
                 context,
                 take_id,
-                started_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
-                start_snapshot: snapshot,
+                started_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+                start_snapshot,
                 partial_video_path,
                 video_path,
                 metadata_path,
@@ -227,32 +304,18 @@ impl TakeCoordinator {
             .active
             .remove(runtime_instance_id)
             .ok_or_else(|| TakeError::NotActive(runtime_instance_id.to_owned()))?;
-        let stats = self
+        let shared = self
             .captures
-            .get(&active.context.source_id)
-            .ok_or_else(|| TakeError::NotPrepared(runtime_instance_id.to_owned()))?
-            .capture
-            .end_recording(
-                runtime_instance_id.to_owned(),
-                stop_snapshot
-                    .callback_monotonic_time_ns
-                    .saturating_add(active.context.sync_offset_ns),
-            )?;
-        tracing::info!(
-            runtime_instance_id,
-            take_id = %active.take_id,
-            frames = stats.frame_count,
-            "recording take capture stopped"
-        );
-        if active.video_path.exists() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "refusing to overwrite an existing take",
-            )
-            .into());
-        }
-        fs::rename(&active.partial_video_path, &active.video_path)?;
+            .get_mut(&active.context.source_id)
+            .ok_or_else(|| TakeError::NotPrepared(runtime_instance_id.to_owned()))?;
+        let stats = shared.capture.end_recording(
+            runtime_instance_id.to_owned(),
+            stop_snapshot.callback_monotonic_time_ns,
+        )?;
 
+        if active.partial_video_path.exists() {
+            fs::rename(&active.partial_video_path, &active.video_path)?;
+        }
         let corrected_start_monotonic_time_ns = active
             .start_snapshot
             .callback_monotonic_time_ns
@@ -385,7 +448,7 @@ impl TakeCoordinator {
                     shared.profile_users.remove(&prepared.encoding_profile);
                     let _ = shared.capture.release_profile(prepared.encoding_profile);
                 }
-                shared.profile_users.is_empty()
+                shared.profile_users.is_empty() && shared.preview_users.is_empty()
             });
         if remove_capture {
             self.captures.remove(&prepared.source_id);
@@ -433,6 +496,14 @@ fn safe_path_component(value: &str) -> String {
     } else {
         result
     }
+}
+
+fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), TakeError> {
+    let temp_path = path.with_extension("json.tmp");
+    let file = fs::File::create(&temp_path)?;
+    serde_json::to_writer_pretty(file, value)?;
+    fs::rename(temp_path, path)?;
+    Ok(())
 }
 
 #[cfg(test)]

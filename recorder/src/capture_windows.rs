@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+#![allow(unsafe_code)]
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -36,10 +37,10 @@ use windows::{
             MFT_ENUM_FLAG, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
             MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
             MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_END_STREAMING,
-            MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_INFO,
-            MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx,
-            MFVideoFormat_H264, MFVideoFormat_I420, MFVideoFormat_IYUV, MFVideoFormat_NV12,
-            MFVideoFormat_YUY2, MFVideoFormat_YV12, MFVideoInterlace_Progressive,
+            MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_INFO, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
+            MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_I420,
+            MFVideoFormat_IYUV, MFVideoFormat_NV12, MFVideoFormat_YUY2, MFVideoFormat_YV12,
+            MFVideoInterlace_Progressive,
         },
         System::{
             Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize},
@@ -47,10 +48,10 @@ use windows::{
             Variant::VARIANT,
         },
     },
-    core::{Error as WindowsError, HSTRING, Interface},
+    core::{Error as WindowsError, GUID, HSTRING, Interface},
 };
 
-use super::{CaptureCommand, CaptureError, CaptureStats};
+use super::{CaptureCommand, CaptureError, CaptureStats, RawPreviewFrame};
 use crate::encoding::{EncodingBackend, EncodingProfile};
 
 const VIDEO_STREAM: u32 = u32::from_ne_bytes(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0.to_ne_bytes());
@@ -113,6 +114,15 @@ struct FormatInfo {
     height: u32,
     frame_rate_numerator: u32,
     frame_rate_denominator: u32,
+    subtype: GUID,
+}
+
+struct PreviewSubscriber {
+    target_width: u32,
+    target_height: u32,
+    min_interval_ns: i64,
+    last_sent_ns: i64,
+    sender: SyncSender<RawPreviewFrame>,
 }
 
 #[derive(Clone)]
@@ -143,7 +153,7 @@ enum WriterMessage {
         response: SyncSender<Result<CaptureStats, String>>,
     },
     Abort {
-        response: Option<SyncSender<Result<CaptureStats, String>>>,
+        response: Option<SyncSender<Result<(), String>>>,
     },
 }
 
@@ -157,14 +167,11 @@ struct WriterEndpoint {
 
 impl WriterEndpoint {
     fn send_packet(&self, packet: EncodedPacket) -> Result<(), CaptureError> {
-        if let Ok(error) = self.status.try_recv() {
-            return Err(CaptureError::WriterFailed(error));
-        }
         match self.sender.try_send(WriterMessage::Packet(packet)) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => {
                 self.dropped_packets.fetch_add(1, Ordering::Relaxed);
-                Err(CaptureError::WriterQueueFull(self.recording_id.clone()))
+                Ok(())
             }
             Err(TrySendError::Disconnected(_)) => Err(CaptureError::WriterFailed(
                 self.status
@@ -172,10 +179,6 @@ impl WriterEndpoint {
                     .unwrap_or_else(|_| format!("writer for {} disconnected", self.recording_id)),
             )),
         }
-    }
-
-    fn increment_dropped(&self) {
-        self.dropped_packets.fetch_add(1, Ordering::Relaxed);
     }
 
     fn finish(mut self, logical_stop_monotonic_time_ns: i64) -> Result<CaptureStats, CaptureError> {
@@ -218,7 +221,6 @@ impl WriterEndpoint {
         let result = response_receiver
             .recv()
             .map_err(|_| CaptureError::WriterFailed("writer abort disconnected".into()))?
-            .map(drop)
             .map_err(CaptureError::WriterFailed);
         if let Some(worker) = self.thread.take() {
             worker.join().map_err(|_| CaptureError::ThreadPanicked)?;
@@ -258,12 +260,6 @@ struct SharedEncoder {
     gop_ring: VecDeque<EncodedPacket>,
     writers: HashMap<String, WriterEndpoint>,
     last_packet_monotonic_time_ns: Option<i64>,
-}
-
-struct PendingEnd {
-    profile: EncodingProfile,
-    logical_stop_monotonic_time_ns: i64,
-    response: SyncSender<Result<CaptureStats, CaptureError>>,
 }
 
 struct QpcClock {
@@ -360,6 +356,7 @@ fn choose_input_type(reader: &IMFSourceReader) -> Result<(IMFMediaType, FormatIn
                     height,
                     frame_rate_numerator: rate_num,
                     frame_rate_denominator: rate_den,
+                    subtype,
                 },
                 score,
             ));
@@ -367,6 +364,63 @@ fn choose_input_type(reader: &IMFSourceReader) -> Result<(IMFMediaType, FormatIn
     }
     best.map(|(media_type, format, _)| (media_type, format))
         .ok_or(CaptureError::NoSupportedFormat)
+}
+
+fn generate_preview_frame(
+    sample: &IMFSample,
+    format: FormatInfo,
+    target_width: u32,
+    target_height: u32,
+    timestamp_ns: i64,
+) -> Result<RawPreviewFrame, CaptureError> {
+    let buffer = unsafe { sample.ConvertToContiguousBuffer() }?;
+    let mut data = std::ptr::null_mut();
+    let mut current_length = 0_u32;
+    unsafe { buffer.Lock(&raw mut data, None, Some(&raw mut current_length)) }?;
+    let slice = if current_length == 0 {
+        &[]
+    } else {
+        // SAFETY: Lock returned current_length readable bytes.
+        unsafe {
+            std::slice::from_raw_parts(
+                data.cast_const(),
+                usize::try_from(current_length).expect("u32 fits in usize"),
+            )
+        }
+    };
+
+    let (tw, th) = if target_width > 0 && target_height > 0 {
+        (target_width as usize, target_height as usize)
+    } else {
+        (480, 270)
+    };
+
+    let rgb_bytes = if format.subtype == MFVideoFormat_YUY2 {
+        crate::preview::convert_yuy2_to_rgb24(
+            slice,
+            format.width as usize,
+            format.height as usize,
+            tw,
+            th,
+        )
+    } else {
+        crate::preview::convert_nv12_to_rgb24(
+            slice,
+            format.width as usize,
+            format.height as usize,
+            tw,
+            th,
+        )
+    };
+    unsafe { buffer.Unlock() }?;
+
+    Ok(RawPreviewFrame {
+        width: tw as u32,
+        height: th as u32,
+        format: "rgb24".into(),
+        frame_data: rgb_bytes,
+        timestamp_ns,
+    })
 }
 
 fn make_output_type(
@@ -449,75 +503,63 @@ impl H264Encoder {
             EncodingBackend::Software,
         ));
 
-        let output_type = make_output_type(format, profile, Some(input_type))?;
         let mut last_error = None;
         for (flags, backend) in candidates {
-            for activation in enumerate_encoder_activations(flags)? {
-                // SAFETY: The activation was returned for the H.264 encoder category.
-                let transform = match unsafe { activation.ActivateObject::<IMFTransform>() } {
-                    Ok(transform) => transform,
-                    Err(error) => {
-                        last_error = Some(error);
-                        continue;
-                    }
-                };
-                match Self::configure(
-                    transform,
-                    input_type,
-                    &output_type,
-                    format,
-                    profile,
-                    backend,
-                ) {
+            let activations = match enumerate_encoder_activations(flags) {
+                Ok(activations) => activations,
+                Err(error) => {
+                    last_error = Some(error);
+                    continue;
+                }
+            };
+            for activation in activations {
+                match Self::try_activate(&activation, input_type, format, profile, backend) {
                     Ok(encoder) => return Ok(encoder),
-                    Err(CaptureError::Windows(error)) => last_error = Some(error),
-                    Err(error) => return Err(error),
+                    Err(error) => last_error = Some(error),
                 }
             }
         }
-        last_error.map_or(Err(CaptureError::NoEncoder), |error| Err(error.into()))
+        Err(last_error.unwrap_or(CaptureError::NoEncoder))
     }
 
-    fn configure(
-        transform: IMFTransform,
+    fn try_activate(
+        activation: &IMFActivate,
         input_type: &IMFMediaType,
-        output_type: &IMFMediaType,
         format: FormatInfo,
         profile: EncodingProfile,
         backend: EncodingBackend,
     ) -> Result<Self, CaptureError> {
-        // SAFETY: Transform attributes and media types are configured before streaming starts.
+        // SAFETY: The activation interface is valid and returned by Media Foundation.
+        let transform: IMFTransform = unsafe { activation.ActivateObject() }?;
+        let output_type = make_output_type(format, profile, Some(input_type))?;
+        // SAFETY: Setting output before input follows standard Media Foundation MFT negotiation.
+        unsafe { transform.SetOutputType(0, &output_type, 0) }?;
+        unsafe { transform.SetInputType(0, input_type, 0) }?;
         let asynchronous = unsafe { transform.GetAttributes() }
-            .ok()
-            .and_then(|attributes| unsafe { attributes.GetUINT32(&MF_TRANSFORM_ASYNC) }.ok())
-            .is_some_and(|value| value != 0);
+            .map(|attributes| {
+                unsafe { attributes.GetUINT32(&MF_TRANSFORM_ASYNC) }.unwrap_or(0) != 0
+            })
+            .unwrap_or(false);
         if asynchronous {
-            let attributes = unsafe { transform.GetAttributes() }?;
-            unsafe { attributes.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1) }?;
+            if let Ok(attributes) = unsafe { transform.GetAttributes() } {
+                // SAFETY: Opting in is required for asynchronous MFTs.
+                let _ = unsafe { attributes.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1) };
+            }
         }
-        unsafe {
-            transform.SetOutputType(0, output_type, 0)?;
-            transform.SetInputType(0, input_type, 0)?;
-        }
-
-        let codec_api = transform.cast::<ICodecAPI>().ok();
+        let codec_api: Option<ICodecAPI> = transform.cast().ok();
         if let Some(codec_api) = &codec_api {
-            let fps = u64::from(format.frame_rate_numerator)
-                / u64::from(format.frame_rate_denominator.max(1));
-            let gop_frames = u32::try_from(
-                ((fps * u64::from(profile.gop_duration_ms)) / 1_000).clamp(1, u64::from(u32::MAX)),
-            )
-            .expect("the GOP frame count was clamped to u32");
+            let gop_frames = u32::max(
+                1,
+                (format.frame_rate_numerator * profile.gop_duration_ms)
+                    / (format.frame_rate_denominator * 1000),
+            );
             let value = VARIANT::from(gop_frames);
-            // SAFETY: The variant contains a VT_UI4 value accepted by the GOP-size codec property.
+            // SAFETY: The variant contains VT_UI4, the type required by MPVGOPSize.
             let _ = unsafe { codec_api.SetValue(&CODECAPI_AVEncMPVGOPSize, &raw const value) };
         }
-
-        // SAFETY: Media types are set and these notifications start the MFT streaming lifecycle.
-        unsafe {
-            transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)?;
-            transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)?;
-        }
+        // SAFETY: NotifyBeginStreaming initializes internal codec state.
+        let _ = unsafe { transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0) };
+        // SAFETY: OutputStreamInfo is valid once input/output types are configured.
         let output_info = unsafe { transform.GetOutputStreamInfo(0) }?;
         let raw_frame_bytes = u64::from(format.width) * u64::from(format.height) * 2;
         let output_buffer_size = output_info
@@ -633,7 +675,7 @@ impl H264Encoder {
             // SAFETY: GetType only reads the event type.
             match unsafe { event.GetType() }? {
                 value if value == METransformNeedInput.0 as u32 => {
-                    self.input_requests = self.input_requests.saturating_add(1);
+                    self.input_requests += 1;
                 }
                 value if value == METransformHaveOutput.0 as u32 => {
                     if let Some(sample) = self.take_output_sample()? {
@@ -661,7 +703,7 @@ impl H264Encoder {
             None
         } else {
             let sample = unsafe { MFCreateSample() }?;
-            let buffer = unsafe { MFCreateMemoryBuffer(self.output_buffer_size.max(1)) }?;
+            let buffer = unsafe { MFCreateMemoryBuffer(self.output_buffer_size) }?;
             unsafe { sample.AddBuffer(&buffer) }?;
             Some(sample)
         };
@@ -709,8 +751,6 @@ impl Drop for H264Encoder {
             self.transform
                 .ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0)
         };
-        // There is no consumer left during Drop, so discard queued output instead of issuing a
-        // drain command whose contract requires processing every remaining output sample.
         let _ = unsafe { self.transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0) };
         let _ = unsafe {
             self.transform
@@ -762,9 +802,12 @@ fn create_muxer(
     dropped_packets: Arc<AtomicU64>,
     logical_start_monotonic_time_ns: i64,
 ) -> Result<ActiveMuxer, CaptureError> {
-    let mut attributes = None;
+    let output_url = HSTRING::from(output_path.to_string_lossy().as_ref());
+    let mut attributes: Option<IMFAttributes> = None;
+    // SAFETY: The output pointer is valid and receives an owned interface.
     unsafe { MFCreateAttributes(&raw mut attributes, 3) }?;
     let attributes = attributes.ok_or(CaptureError::NoEncoder)?;
+    // SAFETY: Attribute values configure the MPEG-4 sink writer behavior.
     unsafe {
         attributes.SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1)?;
         attributes.SetUINT32(&MF_MPEG4SINK_SPSPPS_PASSTHROUGH, 1)?;
@@ -773,7 +816,6 @@ fn create_muxer(
             u32::from(backend == EncodingBackend::Hardware),
         )?;
     }
-    let output_url = HSTRING::from(output_path.to_string_lossy().as_ref());
     let writer = unsafe {
         MFCreateSinkWriterFromURL(&output_url, None::<&IMFByteStream>, Some(&attributes))
     }?;
@@ -986,27 +1028,26 @@ fn writer_thread(args: WriterThreadArgs) {
                 logical_stop_monotonic_time_ns,
                 response,
             }) => {
-                let result = finalize_muxer(muxer, Some(logical_stop_monotonic_time_ns))
-                    .map_err(|error| error.to_string());
-                let _ = response.send(result);
+                let _ = response.send(
+                    finalize_muxer(muxer, Some(logical_stop_monotonic_time_ns))
+                        .map_err(|error| error.to_string()),
+                );
                 drop(platform);
                 return;
             }
             Ok(WriterMessage::Abort { response }) => {
-                let result = finalize_muxer(muxer, None).map_err(|error| error.to_string());
+                let result = finalize_muxer(muxer, None).map(|_| ()).map_err(|error| error.to_string());
                 if let Some(response) = response {
                     let _ = response.send(result);
                 }
                 drop(platform);
                 return;
             }
-            Err(_) => {
-                let _ = finalize_muxer(muxer, None);
-                drop(platform);
-                return;
-            }
+            Err(_) => break,
         }
     }
+    let _ = finalize_muxer(muxer, None);
+    drop(platform);
 }
 
 fn spawn_writer(
@@ -1150,9 +1191,15 @@ impl SharedEncoder {
 
     fn increment_dropped(&self) {
         for writer in self.writers.values() {
-            writer.increment_dropped();
+            writer.dropped_packets.fetch_add(1, Ordering::Relaxed);
         }
     }
+}
+
+struct PendingEnd {
+    profile: EncodingProfile,
+    logical_stop_monotonic_time_ns: i64,
+    response: SyncSender<Result<CaptureStats, CaptureError>>,
 }
 
 fn finalize_endpoint_async(
@@ -1161,7 +1208,8 @@ fn finalize_endpoint_async(
     response: SyncSender<Result<CaptureStats, CaptureError>>,
 ) {
     thread::spawn(move || {
-        let _ = response.send(writer.finish(logical_stop_monotonic_time_ns));
+        let result = writer.finish(logical_stop_monotonic_time_ns);
+        let _ = response.send(result);
     });
 }
 
@@ -1169,13 +1217,17 @@ fn abort_endpoint_async(
     writer: Option<WriterEndpoint>,
     response: SyncSender<Result<(), CaptureError>>,
 ) {
-    thread::spawn(move || {
-        let result = writer.map_or(Ok(()), WriterEndpoint::abort);
-        let _ = response.send(result);
-    });
+    if let Some(writer) = writer {
+        thread::spawn(move || {
+            let result = writer.abort();
+            let _ = response.send(result);
+        });
+    } else {
+        let _ = response.send(Ok(()));
+    }
 }
 
-pub fn run(
+pub(crate) fn run(
     source_id: &str,
     commands: &Receiver<CaptureCommand>,
     ready: &SyncSender<Result<(), CaptureError>>,
@@ -1205,6 +1257,7 @@ pub fn run(
 
     let mut encoders: HashMap<EncodingProfile, SharedEncoder> = HashMap::new();
     let mut recording_profiles: HashMap<String, EncodingProfile> = HashMap::new();
+    let mut preview_subscribers: HashMap<String, PreviewSubscriber> = HashMap::new();
     let mut failed_writers: HashMap<String, String> = HashMap::new();
     let mut pending_ends: HashMap<String, PendingEnd> = HashMap::new();
     let mut clock_anchor: Option<(i64, i64)> = None;
@@ -1238,6 +1291,43 @@ pub fn run(
                         Ok(())
                     };
                     let _ = response.send(result);
+                }
+                Ok(CaptureCommand::SubscribePreview {
+                    subscriber_id,
+                    target_width,
+                    target_height,
+                    max_fps,
+                    sender,
+                    response,
+                }) => {
+                    let fps = if max_fps == 0 {
+                        30
+                    } else {
+                        max_fps.clamp(1, 60)
+                    };
+                    let min_interval_ns = 1_000_000_000 / i64::from(fps);
+                    preview_subscribers.insert(
+                        subscriber_id,
+                        PreviewSubscriber {
+                            target_width: if target_width == 0 { 480 } else { target_width },
+                            target_height: if target_height == 0 {
+                                270
+                            } else {
+                                target_height
+                            },
+                            min_interval_ns,
+                            last_sent_ns: 0,
+                            sender,
+                        },
+                    );
+                    let _ = response.send(Ok(()));
+                }
+                Ok(CaptureCommand::UnsubscribePreview {
+                    subscriber_id,
+                    response,
+                }) => {
+                    preview_subscribers.remove(&subscriber_id);
+                    let _ = response.send(Ok(()));
                 }
                 Ok(CaptureCommand::Begin {
                     recording_id,
@@ -1370,6 +1460,33 @@ pub fn run(
             }
             continue;
         };
+
+        // Dispatch preview frame to subscribers
+        if !preview_subscribers.is_empty() {
+            let mut dead_subscribers = Vec::new();
+            for (sub_id, sub) in &mut preview_subscribers {
+                if arrival_monotonic_time_ns - sub.last_sent_ns >= sub.min_interval_ns {
+                    if let Ok(preview_frame) = generate_preview_frame(
+                        &sample,
+                        format,
+                        sub.target_width,
+                        sub.target_height,
+                        arrival_monotonic_time_ns,
+                    ) {
+                        sub.last_sent_ns = arrival_monotonic_time_ns;
+                        if let Err(TrySendError::Disconnected(_)) =
+                            sub.sender.try_send(preview_frame)
+                        {
+                            dead_subscribers.push(sub_id.clone());
+                        }
+                    }
+                }
+            }
+            for dead_id in dead_subscribers {
+                preview_subscribers.remove(&dead_id);
+            }
+        }
+
         let (source_anchor, monotonic_anchor) =
             *clock_anchor.get_or_insert((timestamp, arrival_monotonic_time_ns));
 

@@ -6,6 +6,15 @@ use thiserror::Error;
 
 use crate::encoding::{EncodingBackend, EncodingProfile};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawPreviewFrame {
+    pub width: u32,
+    pub height: u32,
+    pub format: String,
+    pub frame_data: Vec<u8>,
+    pub timestamp_ns: i64,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CaptureStats {
     pub frame_count: u64,
@@ -63,6 +72,18 @@ enum CaptureCommand {
     },
     ReleaseProfile {
         profile: EncodingProfile,
+        response: mpsc::SyncSender<Result<(), CaptureError>>,
+    },
+    SubscribePreview {
+        subscriber_id: String,
+        target_width: u32,
+        target_height: u32,
+        max_fps: u32,
+        sender: mpsc::SyncSender<RawPreviewFrame>,
+        response: mpsc::SyncSender<Result<(), CaptureError>>,
+    },
+    UnsubscribePreview {
+        subscriber_id: String,
         response: mpsc::SyncSender<Result<(), CaptureError>>,
     },
     Begin {
@@ -160,6 +181,57 @@ impl CaptureHandle {
             })?
     }
 
+    pub fn subscribe_preview(
+        &self,
+        subscriber_id: String,
+        target_width: u32,
+        target_height: u32,
+        max_fps: u32,
+        sender: mpsc::SyncSender<RawPreviewFrame>,
+    ) -> Result<(), CaptureError> {
+        let (response_sender, response_receiver) = mpsc::sync_channel(1);
+        self.commands
+            .send(CaptureCommand::SubscribePreview {
+                subscriber_id,
+                target_width,
+                target_height,
+                max_fps,
+                sender,
+                response: response_sender,
+            })
+            .map_err(|_| CaptureError::CommandDisconnected("subscribing to preview"))?;
+        response_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout => {
+                    CaptureError::CommandTimeout("subscribing to preview")
+                }
+                mpsc::RecvTimeoutError::Disconnected => {
+                    CaptureError::CommandDisconnected("subscribing to preview")
+                }
+            })?
+    }
+
+    pub fn unsubscribe_preview(&self, subscriber_id: &str) -> Result<(), CaptureError> {
+        let (response_sender, response_receiver) = mpsc::sync_channel(1);
+        self.commands
+            .send(CaptureCommand::UnsubscribePreview {
+                subscriber_id: subscriber_id.to_owned(),
+                response: response_sender,
+            })
+            .map_err(|_| CaptureError::CommandDisconnected("unsubscribing from preview"))?;
+        response_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout => {
+                    CaptureError::CommandTimeout("unsubscribing from preview")
+                }
+                mpsc::RecvTimeoutError::Disconnected => {
+                    CaptureError::CommandDisconnected("unsubscribing from preview")
+                }
+            })?
+    }
+
     pub fn begin_recording(
         &self,
         recording_id: String,
@@ -223,7 +295,7 @@ impl CaptureHandle {
             })
             .map_err(|_| CaptureError::CommandDisconnected("aborting recording"))?;
         response_receiver
-            .recv_timeout(Duration::from_secs(15))
+            .recv_timeout(Duration::from_secs(10))
             .map_err(|error| match error {
                 mpsc::RecvTimeoutError::Timeout => {
                     CaptureError::CommandTimeout("aborting recording")
@@ -238,27 +310,27 @@ impl CaptureHandle {
 impl Drop for CaptureHandle {
     fn drop(&mut self) {
         let _ = self.commands.send(CaptureCommand::Shutdown);
-        if let Some(capture_thread) = self.thread.take() {
-            let _ = capture_thread.join();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
         }
-    }
-}
-
-#[cfg(not(windows))]
-mod platform {
-    use super::{CaptureCommand, CaptureError, mpsc};
-
-    pub fn run(
-        _source_id: &str,
-        _commands: &mpsc::Receiver<CaptureCommand>,
-        ready: &mpsc::SyncSender<Result<(), CaptureError>>,
-    ) -> Result<(), CaptureError> {
-        let _ = ready.send(Err(CaptureError::UnsupportedPlatform));
-        Err(CaptureError::UnsupportedPlatform)
     }
 }
 
 #[cfg(windows)]
 #[path = "capture_windows.rs"]
-#[allow(unsafe_code)]
-mod platform;
+pub(crate) mod platform;
+
+#[cfg(not(windows))]
+mod platform {
+    use super::{CaptureCommand, CaptureError};
+    use std::sync::mpsc::{Receiver, SyncSender};
+
+    pub(crate) fn run(
+        _source_id: &str,
+        _commands: &Receiver<CaptureCommand>,
+        ready: &SyncSender<Result<(), CaptureError>>,
+    ) -> Result<(), CaptureError> {
+        let _ = ready.send(Err(CaptureError::UnsupportedPlatform));
+        Err(CaptureError::UnsupportedPlatform)
+    }
+}

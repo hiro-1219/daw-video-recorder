@@ -6,7 +6,7 @@ use prost::Message;
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    sync::Mutex,
+    sync::{Mutex, mpsc as tokio_mpsc},
 };
 
 use crate::{
@@ -56,21 +56,35 @@ pub async fn serve_named_pipe(
 }
 
 pub async fn serve_connection<S>(
-    mut stream: S,
+    stream: S,
     service: Arc<Mutex<RecorderService>>,
 ) -> Result<(), IpcError>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    let (preview_tx, mut preview_rx) = tokio_mpsc::channel::<protocol::PreviewFrame>(4);
     let mut connection_instances = Vec::new();
+
     let connection_result = async {
-        while let Some(request) = read_envelope(&mut stream).await? {
-            let responses = handle_envelope(request, &service).await;
-            for response in responses {
-                if let Some(Payload::InstanceRegistered(registered)) = &response.payload {
-                    connection_instances.push(registered.runtime_instance_id.clone());
+        loop {
+            tokio::select! {
+                request_result = read_envelope(&mut reader) => {
+                    let Some(request) = request_result? else {
+                        break;
+                    };
+                    let responses = handle_envelope(request, &service, &preview_tx).await;
+                    for response in responses {
+                        if let Some(Payload::InstanceRegistered(registered)) = &response.payload {
+                            connection_instances.push(registered.runtime_instance_id.clone());
+                        }
+                        write_envelope(&mut writer, &response).await?;
+                    }
                 }
-                write_envelope(&mut stream, &response).await?;
+                Some(preview_frame) = preview_rx.recv() => {
+                    let preview_envelope = response(0, Payload::PreviewFrame(preview_frame));
+                    write_envelope(&mut writer, &preview_envelope).await?;
+                }
             }
         }
         Ok(())
@@ -117,7 +131,6 @@ where
     let encoded_length =
         u32::try_from(encoded_length).map_err(|_| IpcError::MessageTooLarge(encoded_length))?;
     writer.write_all(&encoded_length.to_le_bytes()).await?;
-
     let mut payload = Vec::with_capacity(encoded_length as usize);
     envelope.encode(&mut payload)?;
     writer.write_all(&payload).await?;
@@ -128,6 +141,7 @@ where
 async fn handle_envelope(
     request: Envelope,
     service: &Arc<Mutex<RecorderService>>,
+    preview_tx: &tokio_mpsc::Sender<protocol::PreviewFrame>,
 ) -> Vec<Envelope> {
     let request_id = request.request_id;
     let Some(payload) = request.payload else {
@@ -253,20 +267,50 @@ async fn handle_envelope(
             state_or_error(request_id, &runtime_id, result)
         }
         Payload::RequestPreview(request_preview) => {
-            tracing::debug!(
-                runtime_id = %request_preview.runtime_instance_id,
-                width = request_preview.width,
-                height = request_preview.height,
-                max_fps = request_preview.max_fps,
-                "preview stream requested"
+            let runtime_id = request_preview.runtime_instance_id.clone();
+            let (sync_tx, sync_rx) =
+                std::sync::mpsc::sync_channel::<crate::capture::RawPreviewFrame>(2);
+            let bridge_tx = preview_tx.clone();
+            let thread_runtime_id = runtime_id.clone();
+            std::thread::Builder::new()
+                .name(format!(
+                    "DAWVR PreviewBridge {}",
+                    &thread_runtime_id[..thread_runtime_id.len().min(8)]
+                ))
+                .spawn(move || {
+                    while let Ok(frame) = sync_rx.recv() {
+                        let proto_frame = protocol::PreviewFrame {
+                            runtime_instance_id: thread_runtime_id.clone(),
+                            width: frame.width,
+                            height: frame.height,
+                            format: frame.format,
+                            frame_data: frame.frame_data,
+                            timestamp_ns: frame.timestamp_ns,
+                        };
+                        if bridge_tx.blocking_send(proto_frame).is_err() {
+                            break;
+                        }
+                    }
+                })
+                .ok();
+
+            let mut service = service.lock().await;
+            let result = service.subscribe_preview(
+                &runtime_id,
+                request_preview.width,
+                request_preview.height,
+                request_preview.max_fps,
+                sync_tx,
             );
-            Vec::new()
+            match result {
+                Ok(()) => Vec::new(),
+                Err(error) => vec![service_error(request_id, &runtime_id, &error)],
+            }
         }
         Payload::StopPreview(stop_preview) => {
-            tracing::debug!(
-                runtime_id = %stop_preview.runtime_instance_id,
-                "preview stream stopped"
-            );
+            let runtime_id = stop_preview.runtime_instance_id;
+            let mut service = service.lock().await;
+            service.unsubscribe_preview(&runtime_id);
             Vec::new()
         }
         Payload::TransportSnapshotBatch(batch) => {
@@ -467,6 +511,7 @@ mod tests {
     #[tokio::test]
     async fn hello_negotiates_current_protocol_version() {
         let service = Arc::new(Mutex::new(RecorderService::new()));
+        let (preview_tx, _preview_rx) = tokio_mpsc::channel(1);
         let request = Envelope {
             protocol_version: PROTOCOL_VERSION,
             request_id: 9,
@@ -477,7 +522,7 @@ mod tests {
             })),
         };
 
-        let responses = handle_envelope(request, &service).await;
+        let responses = handle_envelope(request, &service, &preview_tx).await;
         assert!(matches!(
             responses[0].payload,
             Some(Payload::HelloAck(protocol::HelloAck {
@@ -490,6 +535,7 @@ mod tests {
     #[tokio::test]
     async fn transport_batch_is_always_acknowledged() {
         let service = Arc::new(Mutex::new(RecorderService::new()));
+        let (preview_tx, _preview_rx) = tokio_mpsc::channel(1);
         let runtime_id = {
             let mut locked = service.lock().await;
             locked
@@ -522,7 +568,7 @@ mod tests {
             )),
         };
 
-        let responses = handle_envelope(request, &service).await;
+        let responses = handle_envelope(request, &service, &preview_tx).await;
         assert!(responses.iter().any(|response| matches!(
             &response.payload,
             Some(Payload::TransportAccepted(protocol::TransportAccepted {

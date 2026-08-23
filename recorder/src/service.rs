@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, sync::mpsc::SyncSender};
 
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
+    capture::RawPreviewFrame,
     encoding::EncodingProfile,
     protocol::{TransportSnapshot, VideoSource},
     session::{RecordingAction, RecordingSession, SessionError, SessionStatus},
@@ -58,6 +59,7 @@ impl RecorderService {
     }
 
     pub fn unregister_instance(&mut self, runtime_instance_id: &str) -> bool {
+        self.takes.unsubscribe_preview(runtime_instance_id);
         self.takes.abort(runtime_instance_id);
         self.sessions.remove(runtime_instance_id).is_some()
     }
@@ -154,6 +156,39 @@ impl RecorderService {
         let session = self.session_mut(runtime_instance_id)?;
         session.mark_prepared()?;
         Ok(session.status())
+    }
+
+    pub fn subscribe_preview(
+        &mut self,
+        runtime_instance_id: &str,
+        target_width: u32,
+        target_height: u32,
+        max_fps: u32,
+        sender: SyncSender<RawPreviewFrame>,
+    ) -> Result<(), ServiceError> {
+        let session = self
+            .sessions
+            .get(runtime_instance_id)
+            .ok_or_else(|| ServiceError::UnknownInstance(runtime_instance_id.to_owned()))?;
+        let Some(source_id) = session.selected_source_id() else {
+            return Err(ServiceError::Take(TakeError::NotPrepared(
+                runtime_instance_id.to_owned(),
+            )));
+        };
+        let source_id = source_id.to_owned();
+        self.takes.subscribe_preview(
+            runtime_instance_id,
+            &source_id,
+            target_width,
+            target_height,
+            max_fps,
+            sender,
+        )?;
+        Ok(())
+    }
+
+    pub fn unsubscribe_preview(&mut self, runtime_instance_id: &str) {
+        self.takes.unsubscribe_preview(runtime_instance_id);
     }
 
     pub fn handle_transport(

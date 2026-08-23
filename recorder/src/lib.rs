@@ -4,6 +4,7 @@ pub mod capture;
 pub mod encoding;
 pub mod ipc;
 pub mod metadata;
+pub mod preview;
 pub mod protocol;
 pub mod service;
 pub mod session;
