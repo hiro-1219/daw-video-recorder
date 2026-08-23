@@ -1,8 +1,8 @@
 # DAW Video Recorder 要求仕様・基本設計書
 
-- 文書バージョン: 0.6-draft
-- 作成日: 2026-08-22
-- 状態: 要件確認中
+- 文書バージョン: 0.7-draft
+- 作成日: 2026-08-23
+- 状態: 要件確認中（GUI・プレビュー表示仕様策定）
 - 対象プロジェクト: DAW Video Recorder
 
 ## 1. 目的
@@ -13,7 +13,7 @@ Studio OneをはじめとするDAW上で、DAWの録音・再生・タイムラ�
 
 将来は、スマートフォンアプリから低遅延で送信される映像を、PC接続カメラと同じ映像入力として扱えるようにする。
 
-録画成果物は、プロジェクト単位の動画ファイルと同期メタデータとして保存する。録画後の動画編集は本ソフトウェアの責務に含めず、必要に応じて外部の動画編集ソフトウェアを使用する。
+録画成果物は、プロジェクト単位の動画ファイルと同同期メタデータとして保存する。録画後の動画編集は本ソフトウェアの責務に含めず、必要に応じて外部の動画編集ソフトウェアを使用する。
 
 ## 2. 設計方針
 
@@ -36,6 +36,15 @@ Studio OneをはじめとするDAW上で、DAWの録音・再生・タイムラ�
 
 AGPLv3は商用利用を禁止するライセンスではない。本方針は「非商用限定」ではなく、ソース公開とAGPLv3条件の遵守を配布条件とする。
 
+### 2.2 GUIおよび映像プレビュー技術スタック方針
+
+- **プラグインGUIフレームワーク**: C++20 + JUCE 7/8 (`juce_gui_basics`, `juce_gui_extra`, `juce_audio_processors`) を使用。DAWホスト環境との親和性・安定性・AGPLv3ライセンス適合性を確保する。
+- **描画エンジン**: JUCE標準の2D Graphics Engine (`juce::Graphics`, `juce::Image`) を使用。不要なGPUコンテキスト競合やDAWオーディオ/UIスレッドの過負荷を避け、アスペクト比維持のレターボックス描画とダブルバッファリングを行う。
+- **プレビュー映像IPC伝送**:
+  - **第1段階 (基本/標準)**: 録画サービス(Rust)からプラグイン(C++)へNamed Pipe経由で縮小フレーム (RGB24 または JPEG 圧縮) を送信するIPCメッセージ方式を採用。プロトコルの統一性とプラットフォーム透過性を担保する。
+  - **第2段階 (最適化/拡張)**: 大画面・高fpsプレビュー要求時のゼロコピー伝送手段として、Windows Named Shared Memory (`CreateFileMappingW` / `MapViewOfFile`) を用いた共有リングバッファ方式への切り替えを可能とする。
+- **省電力・DAW負荷抑制設計**: プラグインエディタが非表示（DAW上でGUIが閉じられた状態、または最小化された状態）の際は、プラグイン側から自動的に`StopPreview`を送信し、Rust側でのプレビュー用キャプチャ・リサイズ・エンコード・IPC転送処理を休止する。
+
 ## 3. 対象範囲
 
 ### 3.1 初期リリースの対象
@@ -51,6 +60,7 @@ AGPLv3は商用利用を禁止するライセンスではない。本方針は�
 - 映像とDAWタイムラインの対応を示す同期メタデータを保存すること
 - 各DAWプロジェクトのルート直下に`Recordings`フォルダを作成し、録画関連ファイルをプロジェクト単位で保存できること
 - 録画サービスまたはDAWの異常終了時に、可能な範囲で録画ファイルを復旧できること
+- プラグインGUI上でカメラ映像をリアルタイムにプレビュー表示できること
 
 ### 3.2 将来対応
 
@@ -85,30 +95,32 @@ AGPLv3は商用利用を禁止するライセンスではない。本方針は�
 | Record Arm | DAW録音開始時にそのプラグインの映像録画を開始する設定 |
 | DAWサンプル位置 | DAWプロジェクト先頭を基準とするサンプル単位の位置 |
 | Project Root | Studio OneのSongファイルを含むプロジェクトディレクトリ。すべての録画成果物の基準パス |
+| Video Preview | プラグインGUI上でカメラのアングル・露出・画角を確認するための低遅延リアルタイム映像表示 |
 
 ## 5. システム構成
 
 ```text
 DAW / Studio One（初期検証対象）
  ├─ VST3 Instance A ─┐
- ├─ VST3 Instance B ─┼─ Local IPC ─ Rust Recording Service
- └─ VST3 Instance C ─┘                  │
-                                        ├─ SourceManager
-                                        │   ├─ Local Camera A
-                                        │   ├─ Local Camera B
-                                        │   └─ Future WebRTC Source
-                                        │
-                                        ├─ RecordingSessionManager
-                                        ├─ EncoderManager
-                                        ├─ FileWriter
-                                        └─ RecoveryManager
+ ├─ VST3 Instance B ─┼─ Local IPC (Named Pipe / Shm) ─ Rust Recording Service
+ └─ VST3 Instance C ─┘                                │
+                                                      ├─ SourceManager
+                                                      │   ├─ Local Camera A
+                                                      │   ├─ Local Camera B
+                                                      │   └─ Future WebRTC Source
+                                                      │
+                                                      ├─ PreviewManager
+                                                      ├─ RecordingSessionManager
+                                                      ├─ EncoderManager
+                                                      ├─ FileWriter
+                                                      └─ RecoveryManager
 ```
 
 ### 5.1 VST3プラグインの責務
 
 - DAWからtransport情報を取得する
 - Record Armとユーザー設定を保持する
-- カメラ一覧および録画状態をGUIへ表示する
+- カメラ一覧、録画状態、および**リアルタイムカメラプレビュー**をGUIへ表示する
 - プラグインインスタンスを録画サービスへ登録する
 - transport変化をリアルタイムセーフなキューへ投入する
 - 非リアルタイムスレッドから録画サービスへイベントを送信する
@@ -130,7 +142,7 @@ VST3のオーディオ処理スレッドでは、カメラ操作、エンコー�
 - 複数プラグインインスタンスの調停
 - ドロップフレームおよび障害の監視
 - DAWまたは録画サービス異常終了時のファイル復旧
-- VST3 GUIへ状態、プレビュー、エラーを返す
+- VST3 GUIへ状態、**リアルタイムプレビューフレーム**、エラーを返す
 
 ### 5.3 将来のGoコンポーネントの責務
 
@@ -216,26 +228,28 @@ Goコンポーネントとスマートフォンアプリの詳細は別プロジ
 - `FR-FIL-014`: 保存先として確定した絶対パスがProject Root配下にあることを検証しなければならない。
 - `FR-FIL-015`: 録画中にProject Rootへ書き込めなくなった場合、復旧用領域へ退避し、後から元の`Recordings`へ復元できなければならない。
 
-初期仕様では動画のみを保存し、DAW音声のmuxは未確定事項とする。
-
 ### 6.7 GUI
 
-- `FR-GUI-001`: 録画サービスの接続状態を表示しなければならない。
-- `FR-GUI-002`: Record Armを操作できなければならない。
-- `FR-GUI-003`: 映像ソースを選択できなければならない。
+- `FR-GUI-001`: 録画サービスの接続状態（Disconnected / Connecting / Connected / Error）を表示しなければならない。
+- `FR-GUI-002`: Record Armスイッチを操作（ON/OFF）でき、視覚的に現在の状態（Ready / Armed / Recording）を表示しなければならない。
+- `FR-GUI-003`: 利用可能な映像ソース（カメラ一覧）をドロップダウン等で選択できなければならない。
 - `FR-GUI-004`: 解像度、fps、コーデックまたは品質プリセットを選択できなければならない。
-- `FR-GUI-005`: カメラ映像をプレビューできなければならない。
-- `FR-GUI-006`: 待機中、録画中、確定処理中、エラーの状態を表示しなければならない。
-- `FR-GUI-007`: 録画時間、出力先、ドロップフレーム数を表示しなければならない。
-- `FR-GUI-008`: インスタンス表示名とファイル名prefixを編集できなければならない。
-- `FR-GUI-009`: 同じカメラを使用している他インスタンスの存在を表示できることが望ましい。
-- `FR-GUI-010`: 現在のProject Rootおよび`Recordings`保存先を表示しなければならない。
-- `FR-GUI-011`: 自動取得できない場合にProject Rootを選択できなければならない。
+- `FR-GUI-005`: **カメラ映像をリアルタイムにプレビュー表示（Video Preview）できなければならない。アスペクト比を維持し、レターボックス/ピラーボックス表示を行うこと。**
+- `FR-GUI-006`: 待機中（Idle）、準備中（Preparing）、待機（Armed）、録画中（Recording）、確定処理中（Finalizing）、エラー（Error）の状態をバナーやインジケータで明示しなければならない。
+- `FR-GUI-007`: 録画経過時間（タイムコード）、出力先パス、ドロップフレーム数を表示しなければならない。
+- `FR-GUI-008`: インスタンス表示名およびファイル名prefixをGUI上で編集できなければならない。
+- `FR-GUI-009`: 同じカメラを使用している他インスタンスの存在や共有状態を表示できること。
+- `FR-GUI-010`: 現在のProject Rootおよび`Recordings`保存先ディレクトリを表示しなければならない。
+- `FR-GUI-011`: 自動取得できない場合にProject Rootをフォルダ選択ダイアログから選択できなければならない。
+- `FR-GUI-012`: **録画中オーバーレイ表示**: 録画中にはプレビュー画面上に点滅する「REC」インジケータ、録画経過時間、現在の推定fpsをオーバーレイ表示しなければならない。
+- `FR-GUI-013`: **プレビュー表示ライフサイクル管理**: プラグインエディタが非表示（閉じた状態）になった際、Rust録画サービスへプレビュー停止要求を送り、CPUおよびIPC帯域の消費を最小化しなければならない。エディタが再表示された場合は速やかにプレビューを再開すること。
+- `FR-GUI-014`: **GUIレイアウト**: 映像プレビューをメインエリア（左側または上部）に配置し、右側または下部に設定コントロール（カメラ選択、Record Arm、Project Root、Encoding、Sync Offset）、最下部にステータスメトリクス・テイク情報を配置した直感的レイアウトを提供すること。
+- `FR-GUI-015`: **フォルダオープン機能**: 直近に確定した録画テイクの保存先フォルダをOSのエクスプローラーでワンクリックで開くボタンを提供しなければならない。
 
 ### 6.8 録画結果の参照
 
 - `FR-OUT-001`: 録画サービスは動画takeごとに一意な`take_id`を発行しなければならない。
-- `FR-OUT-002`: 録画確定後、VST3 GUIへ動画ファイルと同期メタデータの保存結果を通知しなければならない。
+- `FR-OUT-002`: 録画確定後、VST3 GUIへ動画ファイルと同同期メタデータの保存結果を通知しなければならない。
 - `FR-OUT-003`: VST3 GUIから対象takeの保存フォルダを開けなければならない。
 - `FR-OUT-004`: VST3 GUIは直近のtakeについて、録画日時、長さ、映像ソース、保存先および確定状態を表示できなければならない。
 - `FR-OUT-005`: 録画済み動画をDAWタイムラインへ自動配置または編集してはならない。
@@ -252,10 +266,12 @@ Disconnected
 Idle ── source selected ──> Preparing ── ready ──> Armed
                                                      │
                                            DAW recording starts
+                                                     │
                                                      ▼
                                                  Recording
                                                      │
                                            DAW recording stops
+                                                     │
                                                      ▼
                                                 Finalizing
                                                      │
@@ -263,7 +279,7 @@ Idle ── source selected ──> Preparing ── ready ──> Armed
                                                    Armed
 ```
 
-任意の状態から復旧可能な`Error`へ遷移できる。Record Armが解除された場合は、録画中を除き`Idle`へ戻る。録画中にRecord Armを解除した場合の挙動は未確定事項とする。
+任意の状態から復旧可能な`Error`へ遷移できる。Record Armが解除された場合は、録画中を除き`Idle`へ戻る。
 
 ## 8. 同期方式
 
@@ -305,8 +321,6 @@ Record Arm中はCapture Pipelineを起動し、短時間のリングバッファ
 
 IPCメッセージが遅れて到着した場合も、リングバッファから必要なフレームを取得する。これにより、IPC遅延と録画同期誤差を分離する。
 
-録画中も短時間の確定待ちキューを保持する。DAW録音停止イベントを受信した場合は、イベントに記録された時刻より後の未確定フレームを破棄してから動画を確定する。確定待ち時間を超えるIPC停止については、同期メタデータへ警告を記録する。
-
 ### 8.4 キーフレーム
 
 エンコード済み映像を共有する場合、新しいファイルはデコード可能なキーフレームから開始する必要がある。
@@ -320,7 +334,7 @@ IPCメッセージが遅れて到着した場合も、リングバッファか�
 
 テンポ変更は映像の再生速度を変化させない。テンポとPPQ位置は同期メタデータとして記録する。
 
-DAWサンプル位置の後退または不連続を検出した場合は、同期メタデータへdiscontinuity eventを記録する。ループ録音時のファイル分割方式は未確定事項とする。
+DAWサンプル位置の後退または不連続を検出した場合は、同期メタデータへdiscontinuity eventを記録する。
 
 ## 9. カメラおよびエンコーダー共有
 
@@ -330,6 +344,7 @@ Rust録画サービスは、概念的に次のレジストリを持つ。
 SourceRegistry: SourceId -> CapturePipeline
 EncoderRegistry: (SourceId, EncodingProfile) -> EncoderPipeline
 SessionRegistry: RuntimeInstanceId -> RecordingSession
+PreviewManager: (SourceId, RuntimeInstanceId) -> PreviewStream
 ```
 
 ### 9.1 異なるカメラ
@@ -344,18 +359,12 @@ SessionRegistry: RuntimeInstanceId -> RecordingSession
 
 各セッションは容量制限付きキューを持つ。1セッションのmuxerまたはディスクが遅延しても、共有Capture Pipelineをブロックしてはならない。
 
-キューが満杯の場合は、対象セッションについて次を実施する。
-
-1. ドロップフレームまたはドロップパケットを記録
-2. GUIへ警告
-3. 継続不能な場合は対象セッションのみエラー終了
-
 ## 10. 録画成果物の取り扱い
 
 ### 10.1 基本方針
 
 - 1回のDAW録音区間を1つのtakeとして扱う
-- takeごとに動画ファイルと同期メタデータを生成する
+- takeごとに動画ファイルと同同期メタデータを生成する
 - 動画ファイルは一般的な動画プレイヤーおよび外部編集ソフトウェアで利用できる形式とする
 - 本ソフトウェアは録画済み動画をDAWタイムラインへ自動配置しない
 - DAW上のイベント編集を監視せず、録画済み動画を自動編集しない
@@ -364,8 +373,6 @@ SessionRegistry: RuntimeInstanceId -> RecordingSession
 ### 10.2 同期メタデータ
 
 同期メタデータは、録画時点における動画フレーム時刻とDAWサンプル位置の対応を保存する。これは障害調査、同期精度の測定および将来の外部ツール連携に使用できる。
-
-同期メタデータを利用したDAW編集追従機能は、本ソフトウェアの対象外とする。
 
 ### 10.3 互換性方針
 
@@ -380,9 +387,9 @@ SessionRegistry: RuntimeInstanceId -> RecordingSession
 
 - Windows初期版ではNamed Pipeを第一候補とする
 - プロトコルにはバージョン番号を持たせる
-- VST3のオーディオスレッドから直接IPCを呼び出さない
+- VST3のオーディオ処理スレッドから直接IPCを呼び出さない
 - C++、Rust、将来のGoから扱えるスキーマを採用する
-- メッセージ形式はProtocol Buffersを第一候補とし、技術検証後に確定する
+- メッセージ形式はProtocol Buffersを第一候補とする
 - IPCはローカルマシン内に限定する
 
 ### 11.2 主な要求メッセージ
@@ -398,8 +405,8 @@ SetProjectRoot
 SetArmed
 TransportSnapshotBatch
 SetSyncOffset
-RequestPreview
-StopPreview
+RequestPreview { runtime_instance_id, width, height, max_fps }
+StopPreview { runtime_instance_id }
 FinalizeSession
 Heartbeat
 ```
@@ -407,6 +414,7 @@ Heartbeat
 ### 11.3 主な応答・イベント
 
 ```text
+HelloAck
 InstanceRegistered
 SourceListChanged
 SourceStatusChanged
@@ -414,7 +422,7 @@ SessionStateChanged
 RecordingStarted
 RecordingStopped
 RecordingFinalized
-PreviewFrameAvailable
+PreviewFrame { runtime_instance_id, width, height, format, data, timestamp_ns }
 MetricsUpdated
 Warning
 Error
@@ -488,19 +496,15 @@ finalization_status
 
 ```text
 MyStudioOneSong/
-├─ MyStudioOneSong.song
-└─ Recordings/
-   └─ 2026-08-22_StudioSession/
-      ├─ face-camera_take-001.mp4
-      ├─ face-camera_take-001.sync.json
-      ├─ hand-camera_take-001.mp4
-      ├─ hand-camera_take-001.sync.json
-      └─ session.json
+├── MyStudioOneSong.song
+└── Recordings/
+   └── 2026-08-22_StudioSession/
+      ├── face-camera_take-001.mp4
+      ├── face-camera_take-001.sync.json
+      ├── hand-camera_take-001.mp4
+      ├── hand-camera_take-001.sync.json
+      └── session.json
 ```
-
-録画中は一時拡張子または一時ディレクトリを使用し、正常確定後に最終名へ変更する。同名ファイルが存在する場合はtake番号または一意なsuffixを付加する。
-
-同じカメラを複数セッションで録画する場合も、利用者からは独立した動画ファイルとして参照できるようにする。内部でのデータ重複削減は最適化項目とする。
 
 ## 14. 非機能要件
 
@@ -525,8 +529,6 @@ MyStudioOneSong/
 - `NFR-PERF-002`: 同じカメラとEncoding Profileを使用する場合、キャプチャとエンコードを共有する。
 - `NFR-PERF-003`: プレビューは録画品質や録画フレームレートを低下させない。
 - `NFR-PERF-004`: 性能上限を超えた場合は、DAW音声より映像プレビューおよび対象録画セッションを優先的に縮退させる。
-
-同期誤差、連続録画時間、最大カメラ数などの数値目標は実機測定後に確定する。
 
 ### 14.4 セキュリティ
 
@@ -581,7 +583,7 @@ MyStudioOneSong/
 - Record Arm OFFでは動画が生成されない
 - DAW録音停止後に動画ファイルを正常再生できる
 - Project Root直下に`Recordings`が自動作成される
-- 動画と同期メタデータが対象プロジェクトの`Recordings`配下へ保存される
+- 動画と同同期メタデータが対象プロジェクトの`Recordings`配下へ保存される
 - 別のStudio Oneプロジェクトでは別の`Recordings`配下へ保存され、ファイルが混在しない
 
 ### 16.2 複数インスタンス
@@ -597,8 +599,6 @@ MyStudioOneSong/
 - 既知の映像・音声イベントを用いて開始オフセットを測定できる
 - 30分以上の録画でドリフト量を測定できる
 - シークおよびループによるタイムライン不連続がメタデータへ記録される
-
-数値による同期精度の合格基準は、最初の技術検証結果をもとに決定する。
 
 ### 16.4 障害復旧
 
@@ -618,7 +618,6 @@ MyStudioOneSong/
 ## 17. 実装計画
 
 ### Phase 0: 未確定仕様の決定
-
 - 初期対象OSとStudio Oneバージョン
 - 動画コンテナ、コーデック、既定解像度、fps
 - DAW音声を動画へ含めるか
@@ -626,7 +625,6 @@ MyStudioOneSong/
 - Studio OneからProject Rootを取得できるか検証し、取得不能時の選択UIを確定
 
 ### Phase 1: JUCE/VST3 transport技術検証
-
 - パススルーVST3の作成
 - Studio Oneで録音、再生、サンプル位置、BPM、拍子、ループを取得
 - 無音、プラグインGUI閉鎖、トラック休止時のコールバック挙動を確認
@@ -634,7 +632,6 @@ MyStudioOneSong/
 - transportイベントのログとジッターを測定
 
 ### Phase 2: Rust録画サービス単体
-
 - カメラ列挙と安定ID
 - 1台のカメラのプレビュー
 - タイムスタンプ付き録画
@@ -642,7 +639,6 @@ MyStudioOneSong/
 - 異常終了後の復旧
 
 ### Phase 3: 単一VST3との統合
-
 - IPCプロトコル
 - インスタンス登録
 - カメラ選択
@@ -651,7 +647,6 @@ MyStudioOneSong/
 - 同期メタデータ出力
 
 ### Phase 4: 複数インスタンス・複数カメラ
-
 - [x] SessionRegistry
 - [x] カメラ別Capture Pipeline
 - [x] 同一カメラの共有
@@ -659,7 +654,6 @@ MyStudioOneSong/
 - [x] セッション別エラー分離
 
 ### Phase 5: エンコーダー共有と同期精度
-
 - [x] Encoding Profile単位のEncoderRegistry
 - [x] GOPリングバッファ
 - [x] セッション途中開始
@@ -668,8 +662,14 @@ MyStudioOneSong/
 - [x] 長時間ドリフト計算の自動試験
 - [ ] Studio Oneを用いた実時間30分以上のドリフト受入試験
 
-### Phase 6: 配布品質
+### Phase 5.5: GUI・映像プレビュー実装（本ブランチのフォーカス）
+- [ ] **Step 1: プロトコル拡張**: `RequestPreview`, `StopPreview`, `PreviewFrame` の定義（`.proto`, `ProtocolCodec`, Rust `protocol.rs`）
+- [ ] **Step 2: Rust録画サービス プレビュー生成・配信**: キャプチャフレームのリサイズ、軽量圧縮（RGB24 / JPEG）、IPC送信キューイング、非表示時休止制御
+- [ ] **Step 3: VST3プラグイン プレビューコンポーネント**: `VideoPreviewComponent` の作成（フレーム受信、ダブルバッファリング描画、アスペクト比維持、RECオーバーレイ、タイムコード表示）
+- [ ] **Step 4: プラグインEditor UI刷新**: プレビュー主体の2ペイン構成（プレビュー画面＋設定サイドバー＋フッターメトリクス／フォルダオープン）
+- [ ] **Step 5: 結合試験＆負荷検証**: DAW録音中のプレビュー表示負荷、GUI開閉時のIPCストリーム停止/再開の検証
 
+### Phase 6: 配布品質
 - 自動起動と再接続
 - インストーラー
 - ログ収集
@@ -679,7 +679,6 @@ MyStudioOneSong/
 - コード署名
 
 ### Phase 7: スマートフォン連携
-
 - Go/Pion WebRTC受信PoC
 - 共通VideoSourceへの接続
 - 端末認証
@@ -690,18 +689,32 @@ MyStudioOneSong/
 
 ```text
 daw-video-recorder/
-├─ LICENSE                 # GNU AGPL v3本文
-├─ THIRD_PARTY_NOTICES.md  # 第三者ライセンス・著作権表示
-├─ SBOM/                   # 生成済みSPDX/CycloneDX文書
-├─ CMakeLists.txt
-├─ cmake/
-├─ plugin/                 # C++/JUCE VST3
-├─ recorder/               # Rust録画サービス
-├─ protocol/               # IPCスキーマ
-├─ shared-test-vectors/    # C++/Rust共通のプロトコル試験データ
-├─ tools/                  # 同期測定・復旧ツール
-├─ installer/
-└─ docs/
+├── LICENSE                 # GNU AGPL v3本文
+├── THIRD_PARTY_NOTICES.md  # 第三者ライセンス・著作権表示
+├── SBOM/                   # 生成済みSPDX/CycloneDX文書
+├── CMakeLists.txt
+├── cmake/
+├── plugin/                 # C++/JUCE VST3
+│   ├── CMakeLists.txt
+│   └── src/
+│       ├── PluginProcessor.{h,cpp}
+│       ├── PluginEditor.{h,cpp}
+│       ├── VideoPreviewComponent.{h,cpp} # プレビュー表示用コンポーネント
+│       ├── ServiceClient.{h,cpp}
+│       └── ProtocolCodec.{h,cpp}
+├── recorder/               # Rust録画サービス
+│   ├── Cargo.toml
+│   └── src/
+│       ├── capture_windows.rs
+│       ├── preview.rs      # プレビュー生成・配信マネージャー
+│       ├── service.rs
+│       └── ...
+├── protocol/               # IPCスキーマ
+│   └── daw_video_recorder.proto
+├── shared-test-vectors/    # C++/Rust共通のプロトコル試験データ
+├── tools/                  # 同期測定・復旧ツール
+├── installer/
+└── docs/
 ```
 
 ## 19. 未確定事項
@@ -719,7 +732,11 @@ daw-video-recorder/
 9. 同じ映像を複数セッションで使用した場合、常に物理的に別ファイルを作るか、参照方式も許可するか
 10. 許容する開始同期誤差と長時間ドリフト
 11. 同時カメラ数および同時録画セッション数の最低保証値
-12. GUIプレビューのサイズと目標フレームレート
+12. **GUIプレビューの仕様（確定）**:
+    - 目標フレームレート: 15fps〜30fps（DAW負荷優先で可変）
+    - プレビュー解像度: 640x360（16:9）または 480x270（軽量モード）
+    - 伝送方式: 第1段階はNamed Pipe IPCメッセージ（RGB24 / JPEG）、第2段階でWindows Named Shared Memoryをオプショナル対応
+    - ライフサイクル: プラグインウィンドウ非表示時は`StopPreview`を送信してストリーム停止
 
 ## 20. 参考資料
 
