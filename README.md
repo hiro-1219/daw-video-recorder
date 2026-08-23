@@ -1,47 +1,154 @@
 # DAW Video Recorder
 
-DAW Video Recorder is an AGPL-licensed VST3 and companion recording service for recording camera video in sync with a DAW transport. The initial compatibility target is Studio One on Windows.
+**DAW Video Recorder** は、DAW（Studio One 等）のトランスポート（録音・再生・停止）と高精度に同期して、Web カメラや HDMI キャプチャデバイスの映像を自動録画するオープンソースシステムです。
 
-The repository currently contains the first implementation foundation:
+音声制作時の演奏・解説動画の収録において、録画開始の手間や後工程での音ズレ・同期合わせ作業をゼロにすることを目的としています。
 
-- `plugin/`: C++/JUCE VST3 transport observer and real-time-safe queue
-- `recorder/`: Rust recording-service state machine and local IPC server
-- `protocol/`: versioned Protocol Buffers IPC contract
-- `SPECIFICATION.md`: requirements and architecture
+---
 
-## Prerequisites
+## 主な機能
 
-- Rust stable
-- CMake 3.25 or later
-- Visual Studio 2022 with Desktop development with C++
-- A JUCE checkout supplied through `DAWVR_JUCE_DIR` or `third_party/JUCE`
+- **DAW 完全同期録画**: DAW で録音を開始すると自動でカメラ録画が始まり、DAW を停止すると即座にテイク動画（MP4）と同期メタデータ（JSON）が確定保存されます。
+- **リアルタイム映像プレビュー**: プラグイン画面内でカメラ映像をアスペクト比維持（レターボックス/ピラーボックス）でプレビュー。録画中点滅バナー（`● REC`）、経過タイムコード、推定フレームレート（fps）をオーバーレイ表示。
+- **プラグイン画面と連動した省電力設計**: プラグインエディタを閉じている間はプレビューストリームを自動停止し、DAW のオーディオ処理やシステムへの負荷を最小化。
+- **GPU ハードウェアエンコード**: Windows Media Foundation を活用した NVENC / Intel QuickSync / AMD AMF 経由の高速 H.264 エンコードに対応。
+- **マルチカメラ & カメラ共有**: 複数のプラグインインスタンスを立ち上げて異なるカメラを同時収録可能。また、複数のトラックで同一カメラを共有しても、エンコード処理を 1 つに統合して低負荷で並行記録。
+- **高精度タイミング同期メタデータ**: 各テイクごとに、DAW トランスポート基準時間、カメラフレームのモノトニック時刻、クロックドリフト補正情報を含む `.sync.json` を出力。
+- **ワンクリック保存先オープン**: 確定したテイクの保存先フォルダをエクスプローラーで即座に開く `Open Folder` ボタンを搭載。
 
-The Rust service currently contains prost-compatible declarations matching the canonical `.proto` file, so a system `protoc` installation is not required for the first milestone. Automated schema code generation will replace these declarations when the C++ IPC client is connected.
+---
 
-## Build the recording service
+## システム構成
+
+```
+┌────────────────────────────────────────────────────────┐
+│ Studio One / DAW Host (VST3 Process)                   │
+│                                                        │
+│  [Audio Thread]                                        │
+│      └─► SPSC Lock-free Queue                          │
+│  [Background Worker / ServiceClient]                  │
+│      └─► Named Pipe IPC (\\.\pipe\daw-video-recorder-v2)│
+│  [GUI / PluginEditor]                                  │
+│      └─► VideoPreviewComponent (JUCE 2D Graphics)      │
+└──────────────────────────┬─────────────────────────────┘
+                           │ Protocol Buffers IPC
+┌──────────────────────────▼─────────────────────────────┐
+│ daw-video-recorder-service.exe (Rust Process)          │
+│                                                        │
+│  - Multi-Client Instance Manager                       │
+│  - Media Foundation Camera Capture & Preview Streamer  │
+│  - Hardware H.264 Encoder (GOP Ring Buffer)            │
+│  - MP4 Muxer & .sync.json Metadata Writer              │
+└────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 動作環境・必要要件
+
+- **OS**: Windows 10 / 11 (64-bit)
+- **DAW**: VST3 プラグインに対応した DAW（Presonus Studio One 等）
+- **ビルドツール**:
+  - Rust 1.80 以上 (stable toolchain)
+  - CMake 3.25 以上
+  - Visual Studio 2022（「C++ によるデスクトップ開発」ワークロード）
+  - JUCE 7/8（`third_party/JUCE` または `DAWVR_JUCE_DIR` で指定）
+
+---
+
+## ビルド手順
+
+### 1. リポジトリのクローン
 
 ```powershell
+git clone --recurse-submodules https://github.com/hiro-1219/daw-video-recorder.git
+cd daw-video-recorder
+```
+
+### 2. Rust 録画サービスのビルド & テスト
+
+```powershell
+# 単体テストの実行
 cargo test --workspace
+
+# リリースビルド
 cargo build --release -p daw-video-recorder-service
 ```
+生成物: `target/release/daw-video-recorder-service.exe`
 
-## Configure the VST3 build
+### 3. C++ VST3 プラグインのビルド
 
 ```powershell
-cmake -S . -B build -DDAWVR_JUCE_DIR=C:/path/to/JUCE
+# CMake の構成 (JUCE を明示する場合は -DDAWVR_JUCE_DIR=... を追加)
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+# プラグインおよびスモークテストツールのビルド
 cmake --build build --config Release
 ```
+生成物:
+- VST3 プラグイン: `build/plugin/DAWVideoRecorderPlugin_artefacts/Release/VST3/DAW Video Recorder.vst3`
+- スモークテストツール: `build/tools/ipc-smoke/DAWVideoRecorderIpcSmoke_artefacts/Release/DAWVideoRecorderIpcSmoke.exe`
 
-The generated VST3 bundle is placed below `build/plugin/DAWVideoRecorderPlugin_artefacts/<Config>/VST3/`.
+---
 
-## Current implementation status
+## インストール・セットアップ
 
-The VST3 captures host transport snapshots into a real-time-safe SPSC queue. Its background worker starts and connects to the Rust service, negotiates protocol v2, enumerates Windows cameras, synchronizes the selected camera, Project Root, Record Arm, encoding profile, and synchronization offset, and sends acknowledged transport batches. Record Arm prepares the selected Media Foundation camera and a profile-keyed H.264 encoder. Sessions selecting the same stable camera and encoding profile share the capture and encoded GOP streams while retaining independent MP4 muxers, recording edges, and synchronization metadata. Frames encoded while the start event is in transit over IPC are recovered from the GOP ring using the event's original monotonic timestamp. During recording, a bounded two-second output holdback lets each muxer discard frames later than the original DAW stop timestamp.
+### 1. 録画サービス実行ファイルの配置
+VST3 プラグインから自動検出・起動できるように、以下のいずれかの方法で配置します：
 
-The current capture path supports independent pipelines for multiple physical cameras, profile-keyed shared H.264 encoding with hardware preference and software fallback, bounded asynchronous per-writer queues, per-session failure isolation, configurable synchronization offset, and drift metadata. Camera sensor-latency calibration, interrupted MP4 recovery, preview, and formal long-duration Studio One timing validation remain in progress.
+- **標準配置場所（推奨）**:
+  `target/release/daw-video-recorder-service.exe` を `%LOCALAPPDATA%\DAW Video Recorder\` にコピーします。
+  ```powershell
+  New-Item -ItemType Directory -Force -Path "$env:LOCALAPPDATA\DAW Video Recorder"
+  Copy-Item "target\release\daw-video-recorder-service.exe" "$env:LOCALAPPDATA\DAW Video Recorder\"
+  ```
+- **環境変数での指定（開発時）**:
+  環境変数 `DAWVR_SERVICE_PATH` に実行ファイルのフルパスを設定します。
 
-During development, start the plug-in host from the repository root or set `DAWVR_SERVICE_PATH` to the full path of `daw-video-recorder-service.exe`. Installed builds look for the service at `%LOCALAPPDATA%\DAW Video Recorder\daw-video-recorder-service.exe`.
+### 2. VST3 プラグインの配置
+ビルドされた `DAW Video Recorder.vst3` を Windows の標準 VST3 ディレクトリにコピーします：
 
-## License
+```powershell
+# 標準 VST3 フォルダにコピー
+Copy-Item -Recurse "build\plugin\DAWVideoRecorderPlugin_artefacts\Release\VST3\DAW Video Recorder.vst3" "C:\Program Files\Common Files\VST3\"
+```
 
-This project is licensed under GNU Affero General Public License v3.0 only. See `LICENSE` and `THIRD_PARTY_NOTICES.md`.
+---
+
+## 使用方法
+
+### 1. Studio One でのセットアップ
+1. Studio One を起動し、トラックのインサートエフェクト（またはマスター/Listen バス）に **「DAW Video Recorder」** を追加します。
+2. プラグイン画面が開くと、バックグラウンドで録画サービスが自動起動・接続されます（ヘッダー右上に緑色で `Connected` と表示されます）。
+3. **Camera Source**: 使用したいカメラ（Web カメラ、キャプチャボード等）を選択します。左ペインにリアルタイムプレビューが表示されます。
+4. **Project Root Folder**: `Browse...` ボタンを押し、プロジェクトの保存先フォルダを指定します（テイク動画は `<ProjectRoot>/Recordings/` に保存されます）。
+5. **Encoding Profile**: 画質とビットレート（4 Mbps / 8 Mbps / 16 Mbps）を選択します。GPU エンコードを使用する場合は `Prefer hardware encoder` を有効にします。
+
+### 2. 録画の実行
+1. プラグイン画面の **`RECORD ARM`** ボタンをクリックして点灯（赤色）させます。
+   - ※この時点でカメラパイプラインが待機（Prepared）状態になり、録音開始時の遅延をゼロにします。
+2. Studio One のトランスポートで **録音（Record）** を開始します。
+   - プレビュー画面に `● REC 00:00:00.000` のタイムコードが表示され、自動的に録画が開始されます。
+3. Studio One で **停止（Stop）** を押します。
+   - 録画が即座に完了・確定し、フッターに直近テイクのファイル名が表示されます。
+4. フッターの **`Open Folder`** ボタンを押すと、録画された MP4 ファイルおよび `.sync.json` メタデータが保存されたフォルダがエクスプローラーで開きます。
+
+---
+
+## 動作確認・テスト
+
+実機カメラや IPC 通信が正常に動作するかを単体でテストするためのスモークテストツールが付属しています。
+
+```powershell
+# スモークテストの実行
+.\build\tools\ipc-smoke\DAWVideoRecorderIpcSmoke_artefacts\Release\DAWVideoRecorderIpcSmoke.exe
+```
+
+- 接続されているカメラが検出され、Primary および Shared クライアントによる並行録画テスト、連続テイク録画テスト、同期メタデータの整合性検証が自動実行されます。
+
+---
+
+## ライセンス
+
+本プロジェクトは **GNU Affero General Public License v3.0 (AGPLv3)** の下で公開されています。
+詳細は [LICENSE](file:///C:/Users/hiro2/Documents/repo/daw-video-recorder/LICENSE) および [THIRD_PARTY_NOTICES.md](file:///C:/Users/hiro2/Documents/repo/daw-video-recorder/THIRD_PARTY_NOTICES.md) をご参照ください。
