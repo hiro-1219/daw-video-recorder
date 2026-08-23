@@ -121,9 +121,9 @@ TransportSnapshot PluginProcessor::captureTransportSnapshot() noexcept
                 snapshot.flags |= TransportFlags::hostTimeValid;
             }
 
-            if (const auto tempo = position->getBpm())
+            if (const auto bpm = position->getBpm())
             {
-                snapshot.tempo = *tempo;
+                snapshot.tempo = *bpm;
                 snapshot.flags |= TransportFlags::tempoValid;
             }
 
@@ -150,16 +150,8 @@ juce::AudioProcessorEditor* PluginProcessor::createEditor()
     return new PluginEditor(*this);
 }
 
-bool PluginProcessor::hasEditor() const
-{
-    return true;
-}
-
-const juce::String PluginProcessor::getName() const
-{
-    return JucePlugin_Name;
-}
-
+bool PluginProcessor::hasEditor() const { return true; }
+const juce::String PluginProcessor::getName() const { return "DAW Video Recorder"; }
 bool PluginProcessor::acceptsMidi() const { return false; }
 bool PluginProcessor::producesMidi() const { return false; }
 bool PluginProcessor::isMidiEffect() const { return false; }
@@ -280,6 +272,21 @@ void PluginProcessor::setSyncOffsetMilliseconds(double milliseconds)
     const auto limited = juce::jlimit(-5'000.0, 5'000.0, milliseconds);
     configuredSyncOffsetNs = static_cast<std::int64_t>(std::llround(limited * 1'000'000.0));
     serviceClient.setSyncOffsetNs(configuredSyncOffsetNs);
+}
+
+void PluginProcessor::setPreviewEnabled(bool enabled)
+{
+    serviceClient.setPreviewEnabled(enabled);
+}
+
+ServiceClient::PreviewFrameData PluginProcessor::latestPreviewFrame() const
+{
+    return serviceClient.latestPreviewFrame();
+}
+
+bool PluginProcessor::isArmed() const noexcept
+{
+    return recordArmState.load(std::memory_order_acquire);
 }
 
 std::uint64_t PluginProcessor::droppedSnapshotCount() const noexcept

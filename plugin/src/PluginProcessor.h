@@ -58,6 +58,10 @@ public:
     [[nodiscard]] double syncOffsetMilliseconds() const noexcept;
     void setSyncOffsetMilliseconds(double milliseconds);
 
+    void setPreviewEnabled(bool enabled);
+    [[nodiscard]] ServiceClient::PreviewFrameData latestPreviewFrame() const;
+    [[nodiscard]] bool isArmed() const noexcept;
+
     [[nodiscard]] std::uint64_t droppedSnapshotCount() const noexcept;
     [[nodiscard]] std::uint64_t sentSnapshotCount() const noexcept;
     [[nodiscard]] bool isTransportWorkerRunning() const noexcept;

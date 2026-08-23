@@ -6,16 +6,31 @@ namespace dawvr
 PluginEditor::PluginEditor(PluginProcessor& processorToUse)
     : AudioProcessorEditor(processorToUse), processor(processorToUse)
 {
+    // Header
     titleLabel.setText("DAW Video Recorder", juce::dontSendNotification);
-    titleLabel.setFont(juce::FontOptions(22.0F, juce::Font::bold));
+    titleLabel.setFont(juce::FontOptions(20.0F, juce::Font::bold));
+    titleLabel.setColour(juce::Label::textColourId, juce::Colours::white);
     addAndMakeVisible(titleLabel);
 
+    serviceStatusLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
+    serviceStatusLabel.setJustificationType(juce::Justification::centredRight);
+    addAndMakeVisible(serviceStatusLabel);
+
+    // Left pane: Video Preview
+    addAndMakeVisible(previewComponent);
+
+    // Right pane: Controls
+    addAndMakeVisible(controlsGroup);
+
+    recordArmButton.setColour(juce::ToggleButton::textColourId, juce::Colours::white);
     armAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         processor.parameters(), "recordArm", recordArmButton);
     addAndMakeVisible(recordArmButton);
 
-    sourceLabel.setText("Camera", juce::dontSendNotification);
+    sourceLabel.setText("Camera Source", juce::dontSendNotification);
+    sourceLabel.setFont(juce::FontOptions(13.0F, juce::Font::bold));
     addAndMakeVisible(sourceLabel);
+
     sourceSelector.addItem("Searching for cameras...", 1);
     sourceSelector.setSelectedId(1, juce::dontSendNotification);
     sourceSelector.setEnabled(false);
@@ -28,8 +43,10 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse)
     };
     addAndMakeVisible(sourceSelector);
 
-    projectRootLabel.setText("Project Root", juce::dontSendNotification);
+    projectRootLabel.setText("Project Root Folder", juce::dontSendNotification);
+    projectRootLabel.setFont(juce::FontOptions(13.0F, juce::Font::bold));
     addAndMakeVisible(projectRootLabel);
+
     projectRootEditor.setText(processor.projectRoot(), false);
     projectRootEditor.onFocusLost = [this] { processor.setProjectRoot(projectRootEditor.getText()); };
     addAndMakeVisible(projectRootEditor);
@@ -37,8 +54,10 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse)
     browseButton.onClick = [this] { chooseProjectRoot(); };
     addAndMakeVisible(browseButton);
 
-    encodingLabel.setText("Encoding", juce::dontSendNotification);
+    encodingLabel.setText("Encoding Profile", juce::dontSendNotification);
+    encodingLabel.setFont(juce::FontOptions(13.0F, juce::Font::bold));
     addAndMakeVisible(encodingLabel);
+
     encodingSelector.addItem("Efficient H.264 / 4 Mbps", 1);
     encodingSelector.addItem("Balanced H.264 / 8 Mbps", 2);
     encodingSelector.addItem("Quality H.264 / 16 Mbps", 3);
@@ -55,101 +74,167 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse)
     };
     addAndMakeVisible(hardwareEncoderButton);
 
-    syncOffsetLabel.setText("Sync offset", juce::dontSendNotification);
+    syncOffsetLabel.setText("Sync Offset", juce::dontSendNotification);
+    syncOffsetLabel.setFont(juce::FontOptions(13.0F, juce::Font::bold));
     addAndMakeVisible(syncOffsetLabel);
+
     syncOffsetSlider.setRange(-5'000.0, 5'000.0, 1.0);
     syncOffsetSlider.setValue(processor.syncOffsetMilliseconds(), juce::dontSendNotification);
     syncOffsetSlider.setTextValueSuffix(" ms");
     syncOffsetSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    syncOffsetSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 90, 24);
+    syncOffsetSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 22);
     syncOffsetSlider.onValueChange = [this] {
         processor.setSyncOffsetMilliseconds(syncOffsetSlider.getValue());
     };
     addAndMakeVisible(syncOffsetSlider);
 
-    serviceStatusLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
-    addAndMakeVisible(serviceStatusLabel);
+    // Footer
+    metricsLabel.setColour(juce::Label::textColourId, juce::Colour(0xff9999aa));
+    metricsLabel.setFont(juce::FontOptions(12.0F, juce::Font::plain));
     addAndMakeVisible(metricsLabel);
-    lastTakeLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+
+    lastTakeLabel.setColour(juce::Label::textColourId, juce::Colour(0xffbbbbcc));
+    lastTakeLabel.setFont(juce::FontOptions(12.0F, juce::Font::plain));
     addAndMakeVisible(lastTakeLabel);
 
+    openTakeFolderButton.setEnabled(false);
+    openTakeFolderButton.onClick = [this] { openLatestTakeFolder(); };
+    addAndMakeVisible(openTakeFolderButton);
+
     setResizable(true, true);
-    setResizeLimits(520, 400, 1000, 800);
-    setSize(680, 460);
+    setResizeLimits(680, 440, 1400, 900);
+    setSize(840, 520);
+
+    processor.setPreviewEnabled(true);
     processor.requestSourceRefresh();
-    startTimerHz(4);
+    startTimerHz(15);
 }
 
 PluginEditor::~PluginEditor()
 {
     stopTimer();
+    processor.setPreviewEnabled(false);
 }
 
 void PluginEditor::paint(juce::Graphics& graphics)
 {
-    graphics.fillAll(juce::Colour::fromRGB(28, 30, 34));
+    graphics.fillAll(juce::Colour(0xff18181c));
+
+    // Header divider line
+    graphics.setColour(juce::Colour(0xff2a2a32));
+    graphics.drawHorizontalLine(42, 0.0f, static_cast<float>(getWidth()));
+
+    // Footer divider line
+    graphics.drawHorizontalLine(getHeight() - 44, 0.0f, static_cast<float>(getWidth()));
 }
 
 void PluginEditor::resized()
 {
-    auto area = getLocalBounds().reduced(20);
-    titleLabel.setBounds(area.removeFromTop(38));
-    area.removeFromTop(8);
-    recordArmButton.setBounds(area.removeFromTop(32));
-    area.removeFromTop(8);
+    auto totalArea = getLocalBounds();
 
-    auto sourceRow = area.removeFromTop(32);
-    sourceLabel.setBounds(sourceRow.removeFromLeft(100));
-    sourceSelector.setBounds(sourceRow);
-    area.removeFromTop(8);
+    // Top Header (Height: 42px)
+    auto headerArea = totalArea.removeFromTop(42).reduced(12, 4);
+    titleLabel.setBounds(headerArea.removeFromLeft(240));
+    serviceStatusLabel.setBounds(headerArea);
 
-    auto rootRow = area.removeFromTop(32);
-    projectRootLabel.setBounds(rootRow.removeFromLeft(100));
-    browseButton.setBounds(rootRow.removeFromRight(100));
-    rootRow.removeFromRight(8);
+    // Bottom Footer (Height: 44px)
+    auto footerArea = totalArea.removeFromBottom(44).reduced(12, 6);
+    openTakeFolderButton.setBounds(footerArea.removeFromRight(100));
+    footerArea.removeFromRight(10);
+    metricsLabel.setBounds(footerArea.removeFromRight(260));
+    lastTakeLabel.setBounds(footerArea);
+
+    // Center Content (2 Panes)
+    auto contentArea = totalArea.reduced(10, 8);
+
+    // Right Control Pane (Fixed width: 300px)
+    auto rightPane = contentArea.removeFromRight(310);
+    controlsGroup.setBounds(rightPane);
+    auto controlsInner = rightPane.reduced(12, 20);
+
+    // Record Arm Button (Big & prominent)
+    recordArmButton.setBounds(controlsInner.removeFromTop(34));
+    controlsInner.removeFromTop(10);
+
+    // Camera Source
+    sourceLabel.setBounds(controlsInner.removeFromTop(20));
+    sourceSelector.setBounds(controlsInner.removeFromTop(28));
+    controlsInner.removeFromTop(8);
+
+    // Encoding
+    encodingLabel.setBounds(controlsInner.removeFromTop(20));
+    encodingSelector.setBounds(controlsInner.removeFromTop(28));
+    controlsInner.removeFromTop(4);
+    hardwareEncoderButton.setBounds(controlsInner.removeFromTop(24));
+    controlsInner.removeFromTop(8);
+
+    // Project Root
+    projectRootLabel.setBounds(controlsInner.removeFromTop(20));
+    auto rootRow = controlsInner.removeFromTop(28);
+    browseButton.setBounds(rootRow.removeFromRight(75));
+    rootRow.removeFromRight(6);
     projectRootEditor.setBounds(rootRow);
-    area.removeFromTop(8);
+    controlsInner.removeFromTop(8);
 
-    auto encodingRow = area.removeFromTop(32);
-    encodingLabel.setBounds(encodingRow.removeFromLeft(100));
-    encodingSelector.setBounds(encodingRow.removeFromLeft(280));
-    encodingRow.removeFromLeft(8);
-    hardwareEncoderButton.setBounds(encodingRow);
-    area.removeFromTop(8);
+    // Sync Offset
+    syncOffsetLabel.setBounds(controlsInner.removeFromTop(20));
+    syncOffsetSlider.setBounds(controlsInner.removeFromTop(28));
 
-    auto offsetRow = area.removeFromTop(32);
-    syncOffsetLabel.setBounds(offsetRow.removeFromLeft(100));
-    syncOffsetSlider.setBounds(offsetRow);
-    area.removeFromTop(16);
+    // Left Pane: Video Preview (Takes remaining area)
+    contentArea.removeFromRight(8); // Gap
+    previewComponent.setBounds(contentArea);
+}
 
-    serviceStatusLabel.setBounds(area.removeFromTop(28));
-    metricsLabel.setBounds(area.removeFromTop(28));
-    lastTakeLabel.setBounds(area.removeFromTop(48));
+void PluginEditor::visibilityChanged()
+{
+    const auto showing = isShowing();
+    processor.setPreviewEnabled(showing);
 }
 
 void PluginEditor::timerCallback()
 {
     updateSourceSelector();
+
     const auto connectionState = processor.serviceConnectionState();
     serviceStatusLabel.setText(processor.serviceStatusText(), juce::dontSendNotification);
     const auto colour = connectionState == ServiceConnectionState::connected
-                            ? juce::Colours::lightgreen
-                            : (connectionState == ServiceConnectionState::error ? juce::Colours::red
-                                                                                : juce::Colours::orange);
+                            ? juce::Colour(0xff4caf50)
+                            : (connectionState == ServiceConnectionState::error ? juce::Colour(0xffe53935)
+                                                                                : juce::Colour(0xffff9800));
     serviceStatusLabel.setColour(juce::Label::textColourId, colour);
+
     metricsLabel.setText(
-        "Transport sent: " + juce::String(processor.sentSnapshotCount())
-            + " / queue drops: " + juce::String(processor.droppedSnapshotCount()),
+        "Sent: " + juce::String(processor.sentSnapshotCount())
+            + " | Drops: " + juce::String(processor.droppedSnapshotCount()),
         juce::dontSendNotification);
 
     const auto latestTake = processor.latestFinalizedTake();
     if (latestTake.revision != 0U && latestTake.revision != displayedTakeRevision)
     {
         displayedTakeRevision = latestTake.revision;
-        lastTakeLabel.setText("Last take: " + latestTake.videoPath,
+        currentVideoPath = latestTake.videoPath;
+        lastTakeLabel.setText("Last take: " + juce::File(latestTake.videoPath).getFileName(),
                               juce::dontSendNotification);
-        lastTakeLabel.setTooltip(latestTake.metadataPath);
+        lastTakeLabel.setTooltip(latestTake.videoPath);
+        openTakeFolderButton.setEnabled(juce::File(currentVideoPath).existsAsFile());
     }
+
+    // Update preview frame from service client
+    previewComponent.setFrameData(processor.latestPreviewFrame());
+
+    // Update preview overlay state
+    const auto isArmed = processor.isArmed();
+    // Simulate/track recording duration if armed/connected
+    std::int64_t duration = 0;
+    if (wasRecording)
+    {
+        duration = juce::Time::currentTimeMillis() - recordingStartTimeMs;
+    }
+    previewComponent.updateState(connectionState,
+                                 processor.serviceStatusText(),
+                                 isArmed,
+                                 wasRecording,
+                                 duration);
 }
 
 void PluginEditor::updateSourceSelector()
@@ -207,5 +292,17 @@ void PluginEditor::chooseProjectRoot()
                                      processor.setProjectRoot(result.getFullPathName());
                                  }
                              });
+}
+
+void PluginEditor::openLatestTakeFolder()
+{
+    if (currentVideoPath.isNotEmpty())
+    {
+        const juce::File videoFile(currentVideoPath);
+        if (videoFile.existsAsFile())
+            videoFile.revealToUser();
+        else if (videoFile.getParentDirectory().exists())
+            videoFile.getParentDirectory().startAsProcess();
+    }
 }
 } // namespace dawvr

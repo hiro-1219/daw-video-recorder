@@ -33,6 +33,16 @@ struct FinalizedTakeInfo final
 class ServiceClient final : private juce::Thread
 {
 public:
+    struct PreviewFrameData final
+    {
+        std::uint32_t width{};
+        std::uint32_t height{};
+        juce::String format;
+        std::vector<std::uint8_t> frameData;
+        std::int64_t timestampNs{};
+        std::uint64_t revision{};
+    };
+
     ServiceClient(SpscQueue<TransportSnapshot, 2048U>& queueToDrain,
                   std::atomic<bool>& recordArmState);
     ~ServiceClient() override;
@@ -46,6 +56,7 @@ public:
                             std::uint32_t gopDurationMs,
                             bool preferHardware);
     void setSyncOffsetNs(std::int64_t offsetNs);
+    void setPreviewEnabled(bool enabled);
     void requestSourceRefresh() noexcept;
 
     [[nodiscard]] bool isWorkerRunning() const noexcept;
@@ -56,11 +67,13 @@ public:
     [[nodiscard]] std::uint64_t sourceListRevision() const noexcept;
     [[nodiscard]] std::vector<protocol::CameraSource> availableSources() const;
     [[nodiscard]] FinalizedTakeInfo latestFinalizedTake() const;
+    [[nodiscard]] PreviewFrameData latestPreviewFrame() const;
 
 private:
     void run() override;
     bool connectAndRegister();
     bool synchronizeConfiguration();
+    bool synchronizePreviewState();
     bool refreshSources();
     bool sendTransportBatch();
     bool sendMessage(const protocol::Bytes& message);
@@ -72,6 +85,7 @@ private:
     void disconnect();
     void setStatus(ServiceConnectionState state, juce::String text);
     void storeFinalizedTake(const protocol::Response& response);
+    void storePreviewFrame(const protocol::Response& response);
     [[nodiscard]] std::uint64_t nextRequestId() noexcept;
 
     SpscQueue<TransportSnapshot, 2048U>& queue;
@@ -87,6 +101,7 @@ private:
     std::uint32_t configuredGopDurationMs { 2'000U };
     bool configuredPreferHardware { true };
     std::int64_t configuredSyncOffsetNs{};
+    std::atomic<bool> previewEnabledState { false };
     std::atomic<std::uint64_t> configurationRevision { 1U };
     std::atomic<bool> sourceRefreshRequested { true };
 
@@ -96,6 +111,9 @@ private:
     mutable juce::CriticalSection finalizedTakeLock;
     FinalizedTakeInfo finalizedTake;
 
+    mutable juce::CriticalSection previewLock;
+    PreviewFrameData currentPreviewFrame;
+
     mutable juce::CriticalSection statusLock;
     juce::String currentStatus { "Stopped" };
     std::atomic<ServiceConnectionState> currentState { ServiceConnectionState::stopped };
@@ -103,6 +121,7 @@ private:
     std::string runtimeInstanceId;
     std::uint64_t appliedConfigurationRevision{};
     bool lastSentArmed{};
+    bool lastSentPreviewEnabled{};
     std::string lastSentProjectRoot;
     std::string lastSentSourceId;
     std::uint32_t lastSentBitRate{};

@@ -152,6 +152,12 @@ void ServiceClient::setSyncOffsetNs(std::int64_t offsetNs)
     notify();
 }
 
+void ServiceClient::setPreviewEnabled(bool enabled)
+{
+    previewEnabledState.store(enabled, std::memory_order_release);
+    notify();
+}
+
 void ServiceClient::requestSourceRefresh() noexcept
 {
     sourceRefreshRequested.store(true, std::memory_order_release);
@@ -201,6 +207,12 @@ FinalizedTakeInfo ServiceClient::latestFinalizedTake() const
     return finalizedTake;
 }
 
+ServiceClient::PreviewFrameData ServiceClient::latestPreviewFrame() const
+{
+    const juce::ScopedLock lock(previewLock);
+    return currentPreviewFrame;
+}
+
 void ServiceClient::run()
 {
     while (!threadShouldExit())
@@ -223,7 +235,7 @@ void ServiceClient::run()
             continue;
         }
 
-        if (!synchronizeConfiguration() || !sendTransportBatch())
+        if (!synchronizeConfiguration() || !synchronizePreviewState() || !sendTransportBatch())
         {
             disconnect();
             wait(250);
@@ -299,6 +311,7 @@ bool ServiceClient::connectAndRegister()
     lastSentPreferHardware = false;
     lastSentSyncOffsetNs = std::numeric_limits<std::int64_t>::min();
     lastSentArmed = false;
+    lastSentPreviewEnabled = false;
     nextSourceRefreshTimeMs = 0;
     sourceRefreshRequested.store(true, std::memory_order_release);
     setStatus(ServiceConnectionState::connected,
@@ -414,6 +427,28 @@ bool ServiceClient::synchronizeConfiguration()
     return true;
 }
 
+bool ServiceClient::synchronizePreviewState()
+{
+    const auto previewEnabled = previewEnabledState.load(std::memory_order_acquire);
+    if (previewEnabled == lastSentPreviewEnabled)
+        return true;
+
+    const auto requestId = nextRequestId();
+    if (previewEnabled)
+    {
+        if (!sendMessage(protocol::makeRequestPreview(requestId, runtimeInstanceId, 480U, 270U, 30U)))
+            return false;
+    }
+    else
+    {
+        if (!sendMessage(protocol::makeStopPreview(requestId, runtimeInstanceId)))
+            return false;
+    }
+
+    lastSentPreviewEnabled = previewEnabled;
+    return true;
+}
+
 bool ServiceClient::sendTransportBatch()
 {
     std::vector<TransportSnapshot> snapshots;
@@ -502,6 +537,11 @@ bool ServiceClient::exchange(const protocol::Bytes& message,
             storeFinalizedTake(response);
             continue;
         }
+        if (response.kind == protocol::ResponseKind::previewFrame)
+        {
+            storePreviewFrame(response);
+            continue;
+        }
         if (response.requestId == requestId && response.kind == expectedKind)
             return true;
     }
@@ -515,6 +555,17 @@ void ServiceClient::storeFinalizedTake(const protocol::Response& response)
     finalizedTake.videoPath = juce::String::fromUTF8(response.videoPath.c_str());
     finalizedTake.metadataPath = juce::String::fromUTF8(response.metadataPath.c_str());
     ++finalizedTake.revision;
+}
+
+void ServiceClient::storePreviewFrame(const protocol::Response& response)
+{
+    const juce::ScopedLock lock(previewLock);
+    currentPreviewFrame.width = response.width;
+    currentPreviewFrame.height = response.height;
+    currentPreviewFrame.format = juce::String::fromUTF8(response.format.c_str());
+    currentPreviewFrame.frameData = response.frameData;
+    currentPreviewFrame.timestampNs = response.timestampNs;
+    ++currentPreviewFrame.revision;
 }
 
 void ServiceClient::disconnect()

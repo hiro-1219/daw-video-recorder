@@ -2,6 +2,7 @@
 #pragma once
 
 #include "PluginProcessor.h"
+#include "VideoPreviewComponent.h"
 
 #include <juce_gui_extra/juce_gui_extra.h>
 
@@ -17,33 +18,51 @@ public:
 
     void paint(juce::Graphics&) override;
     void resized() override;
+    void visibilityChanged() override;
 
 private:
     void timerCallback() override;
     void chooseProjectRoot();
     void updateSourceSelector();
+    void openLatestTakeFolder();
 
     PluginProcessor& processor;
+
+    // Header
     juce::Label titleLabel;
-    juce::ToggleButton recordArmButton { "Record Arm" };
+    juce::Label serviceStatusLabel;
+
+    // Left pane: Video preview
+    VideoPreviewComponent previewComponent;
+
+    // Right pane: Controls
+    juce::GroupComponent controlsGroup{ "controlsGroup", "Settings & Arm" };
+    juce::ToggleButton recordArmButton{ "RECORD ARM" };
     juce::Label sourceLabel;
     juce::ComboBox sourceSelector;
     juce::Label projectRootLabel;
     juce::TextEditor projectRootEditor;
-    juce::TextButton browseButton { "Browse..." };
+    juce::TextButton browseButton{ "Browse..." };
     juce::Label encodingLabel;
     juce::ComboBox encodingSelector;
-    juce::ToggleButton hardwareEncoderButton { "Prefer hardware encoder" };
+    juce::ToggleButton hardwareEncoderButton{ "Prefer hardware encoder" };
     juce::Label syncOffsetLabel;
     juce::Slider syncOffsetSlider;
-    juce::Label serviceStatusLabel;
+
+    // Footer
     juce::Label metricsLabel;
     juce::Label lastTakeLabel;
+    juce::TextButton openTakeFolderButton{ "Open Folder" };
+
     std::unique_ptr<juce::FileChooser> fileChooser;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> armAttachment;
     std::vector<protocol::CameraSource> displayedSources;
     std::uint64_t displayedSourceRevision{};
     std::uint64_t displayedTakeRevision{};
+    juce::String currentVideoPath;
+
+    juce::int64 recordingStartTimeMs{ 0 };
+    bool wasRecording{ false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginEditor)
 };

@@ -23,7 +23,9 @@ target_sources(DAWVideoRecorderPlugin PRIVATE
     src/ServiceClient.cpp
     src/ServiceClient.h
     src/SpscQueue.h
-    src/TransportSnapshot.h)
+    src/TransportSnapshot.h
+    src/VideoPreviewComponent.cpp
+    src/VideoPreviewComponent.h)
 
 target_compile_features(DAWVideoRecorderPlugin PRIVATE cxx_std_20)
 
