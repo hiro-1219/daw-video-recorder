@@ -60,6 +60,10 @@ Implemented:
 - take metadata synchronization manager (`TakeSyncManager`) reading `.sync.json` files from `<Project Root>/Recordings`
 - sample-accurate DAW host transport synchronization (playing / stopped / seek positions)
 - 3 view modes in VST GUI: `Auto (Sync Playback / Live Rec)`, `Recorded Take (DAW Sync)`, `Live Camera Preview`
+- centralized live/recorded presentation policy where DAW playback overrides Record Arm in Auto mode
+- signed take-offset mapping from DAW samples to time since the first MP4 frame
+- Media Foundation playback path normalization for finalized `\\?\` drive and UNC paths
+- distinct recorded-playback placeholders for missing take, unavailable position, range, and decoder failures
 - GUI take selector and status overlays (Play/Pause badges, timeline progress bar, out-of-range indicators, REC blink)
 - expected-response IPC correlation for transport batches that interleave state and finalization events
 - `.sync.json` take discovery with read compatibility for legacy `.mp4.json` metadata
@@ -92,5 +96,7 @@ cargo test --test multi_camera_smoke -- --ignored --nocapture
 ```
 
 The IPC smoke test lets two C++ clients automatically launch and connect to the Rust service. It verifies protocol v2 profile/offset configuration, metadata schema v2, shared hardware H.264 encoding, the same first and last frame timestamps in independent MP4 files, a second take while another client remains attached, encoded-GOP recovery, and tail trimming. The ignored physical-camera tests exercise hardware/software profile separation and two independent camera pipelines; they are run explicitly on a suitable Windows host.
+
+`DAWVideoRecorderIpcSmoke.exe --playback-logic-only` verifies the Auto view state matrix and positive/negative synchronization-offset mapping without a camera. When a camera is present, the full IPC smoke additionally opens a finalized take with the same Media Foundation decoder used by the GUI, maps an in-range DAW sample, and decodes a frame.
 
 This environment supplied duplicate `Path` and `PATH` variables. They were normalized in the CMake process before invoking MSBuild; this is an execution-environment workaround, not a project requirement.

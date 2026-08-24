@@ -40,6 +40,21 @@ sequenceDiagram
 
 `RequestPreview`と`StopPreview`は成功時に直接の応答を返しません。`PreviewFrame`は制御メッセージと同じNamed Pipe上へ非同期に送られます。プラグインウィンドウの非表示・破棄と自動連動する停止処理は、現時点では未実装です。
 
+### 表示ソース選択と録画テイク同期
+
+GUIは`VideoPlaybackPolicy`でライブ映像と録画済み映像の選択を一度だけ決定し、その結果をMP4デコーダー、プレビュー購読、描画へ共通で渡します。Autoモードでは、DAW録音中はライブ、DAW再生中で選択テイクがある場合はArm状態にかかわらず録画済み映像を表示します。停止中はArm有効ならライブ、Arm無効でテイクがあれば録画済み停止フレーム、テイクがなければライブです。Recorded TakeとLive Cameraはそれぞれ明示的に選択したソースを固定します。
+
+`sync_offset_ns`は`first_frame_monotonic_time_ns - corrected_start_monotonic_time_ns`です。したがってDAWサンプル位置からMP4内時刻への変換は次の式です。
+
+```text
+video_time_seconds = (current_sample - start_project_sample) / sample_rate
+                     - sync_offset_ns / 1,000,000,000
+```
+
+負のオフセットはMP4の先頭フレームがDAWテイク開始より前に存在することを意味します。GUIはテイクなし、DAW位置取得不能、テイク範囲外、デコード失敗を別々のプレースホルダーとして表示します。
+
+録画サービスのメタデータはWindows拡張パスの`\\?\`接頭辞を含む場合があります。`MFVideoDecoder`はファイル存在確認にはそのパスを保持し、`MFCreateSourceReaderFromURL`へ渡す際だけ通常のドライブ／UNCパスへ正規化します。これを行わない場合、有効なH.264 MP4でもMedia Foundationが開けません。
+
 ---
 
 ## 2. 技術スタック選定

@@ -77,6 +77,7 @@ private:
     std::uint64_t displayedTakeManagerRevision{};
     juce::String currentVideoPath;
     juce::String currentLoadedVideoFile;
+    VideoPresentationSource currentPresentationSource{ VideoPresentationSource::liveCamera };
     bool previewStreamingEnabled{ false };
     bool previewLifecycleInitialized{ false };
 

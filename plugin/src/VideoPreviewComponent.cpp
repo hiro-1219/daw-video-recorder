@@ -44,6 +44,12 @@ void VideoPreviewComponent::setRecordedFrame(const juce::Image& image)
     ++frameCountForFps;
 }
 
+void VideoPreviewComponent::clearRecordedFrame()
+{
+    const juce::ScopedLock lock(imageLock);
+    currentRecordedImage = {};
+}
+
 void VideoPreviewComponent::setLiveFrameData(const ServiceClient::PreviewFrameData& frame)
 {
     if (frame.revision == lastLiveFrameRevision || frame.frameData.empty())
@@ -106,23 +112,8 @@ void VideoPreviewComponent::paint(juce::Graphics& g)
     const auto bounds = getLocalBounds().toFloat();
     g.fillAll(juce::Colour(0xff121214)); // Dark background
 
-    // Determine whether to display Live Camera or Recorded Take
-    bool showLive = false;
-    if (viewMode == VideoViewMode::liveCamera)
-    {
-        showLive = true;
-    }
-    else if (viewMode == VideoViewMode::autoSync)
-    {
-        if (recording || armed || !playbackState.hasTake)
-            showLive = true;
-        else
-            showLive = false;
-    }
-    else // recordedTake
-    {
-        showLive = false;
-    }
+    const auto showLive = playbackState.presentationSource
+                          == VideoPresentationSource::liveCamera;
 
     juce::Image imageToDraw;
     {
@@ -134,7 +125,8 @@ void VideoPreviewComponent::paint(juce::Graphics& g)
         }
         else
         {
-            if (!playbackState.isOutOfRange && currentRecordedImage.isValid())
+            if (playbackState.recordedStatus == RecordedPlaybackStatus::ready
+                && currentRecordedImage.isValid())
                 imageToDraw = currentRecordedImage;
         }
     }
@@ -206,7 +198,8 @@ void VideoPreviewComponent::renderPlaceholder(juce::Graphics& g, const juce::Rec
     g.setColour(juce::Colour(0xff888899));
     g.setFont(juce::FontOptions(14.0f, juce::Font::plain));
 
-    bool showLive = (viewMode == VideoViewMode::liveCamera || (viewMode == VideoViewMode::autoSync && (recording || armed || !playbackState.hasTake)));
+    const auto showLive = playbackState.presentationSource
+                          == VideoPresentationSource::liveCamera;
 
     juce::String placeholderText;
     if (showLive)
@@ -226,9 +219,19 @@ void VideoPreviewComponent::renderPlaceholder(juce::Graphics& g, const juce::Rec
         {
             placeholderText = "No Recorded Take Available\nRecord a take or select an existing take";
         }
-        else if (playbackState.isOutOfRange)
+        else if (playbackState.recordedStatus == RecordedPlaybackStatus::positionUnavailable)
+        {
+            placeholderText = "DAW Playhead Position Unavailable\n[ Take: "
+                              + playbackState.takeLabel + " ]";
+        }
+        else if (playbackState.recordedStatus == RecordedPlaybackStatus::outOfRange)
         {
             placeholderText = "DAW Playhead Outside Take Range\n[ Take: " + playbackState.takeLabel + " ]";
+        }
+        else if (playbackState.recordedStatus == RecordedPlaybackStatus::decoderError)
+        {
+            placeholderText = "Could Not Decode Recorded Take\n[ Take: "
+                              + playbackState.takeLabel + " ]";
         }
         else
         {
@@ -244,7 +247,8 @@ void VideoPreviewComponent::renderPlaceholder(juce::Graphics& g, const juce::Rec
 
 void VideoPreviewComponent::renderOverlay(juce::Graphics& g, const juce::Rectangle<float>& videoBounds)
 {
-    bool showLive = (viewMode == VideoViewMode::liveCamera || (viewMode == VideoViewMode::autoSync && (recording || armed || !playbackState.hasTake)));
+    const auto showLive = playbackState.presentationSource
+                          == VideoPresentationSource::liveCamera;
 
     if (showLive)
     {

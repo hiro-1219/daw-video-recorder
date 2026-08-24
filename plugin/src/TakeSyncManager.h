@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #pragma once
 
+#include "VideoPlaybackPolicy.h"
+
 #include <juce_core/juce_core.h>
 
 #include <cstdint>
@@ -49,7 +51,8 @@ public:
     // Returns whether currentSample is within the range of the currently selected take
     [[nodiscard]] bool isSampleInRange(std::int64_t currentProjectSample) const;
 
-    // Calculates the playback time in seconds for the selected take given the current DAW sample position.
+    // Calculates time since the first MP4 frame for the selected DAW sample position.
+    // syncOffsetNs is subtracted because it is first-frame time minus corrected DAW-start time.
     // Returns std::nullopt if no take is selected or current sample is invalid.
     [[nodiscard]] std::optional<double> calculateVideoTimeSeconds(std::int64_t currentProjectSample) const;
 

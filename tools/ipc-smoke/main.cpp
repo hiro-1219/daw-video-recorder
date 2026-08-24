@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include "ServiceClient.h"
+#include "MFVideoDecoder.h"
+#include "VideoPlaybackPolicy.h"
 
 #include <juce_core/juce_core.h>
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <iostream>
 #include <string_view>
 
@@ -16,10 +19,90 @@ std::int64_t monotonicTimeNs() noexcept
                std::chrono::steady_clock::now().time_since_epoch())
         .count();
 }
+
+bool runPlaybackLogicSelfTest()
+{
+    using dawvr::VideoPresentationContext;
+    using dawvr::VideoPresentationSource;
+    using dawvr::VideoViewMode;
+
+    const auto resolvesTo = [](VideoViewMode mode,
+                               bool playing,
+                               bool recording,
+                               bool armed,
+                               bool hasTake,
+                               VideoPresentationSource expected) {
+        return dawvr::resolveVideoPresentationSource(
+                   VideoPresentationContext{ mode, playing, recording, armed, hasTake })
+               == expected;
+    };
+
+    if (!resolvesTo(VideoViewMode::autoSync, true, false, true, true,
+                    VideoPresentationSource::recordedTake)
+        || !resolvesTo(VideoViewMode::autoSync, true, true, true, true,
+                       VideoPresentationSource::liveCamera)
+        || !resolvesTo(VideoViewMode::autoSync, false, false, true, true,
+                       VideoPresentationSource::liveCamera)
+        || !resolvesTo(VideoViewMode::autoSync, false, false, false, true,
+                       VideoPresentationSource::recordedTake)
+        || !resolvesTo(VideoViewMode::autoSync, true, false, false, false,
+                       VideoPresentationSource::liveCamera)
+        || !resolvesTo(VideoViewMode::recordedTake, false, false, true, false,
+                       VideoPresentationSource::recordedTake)
+        || !resolvesTo(VideoViewMode::liveCamera, true, false, false, true,
+                       VideoPresentationSource::liveCamera))
+    {
+        std::cerr << "Video presentation policy self-test failed\n";
+        return false;
+    }
+
+    const auto negativeOffset = dawvr::mapProjectSampleToVideoTimeSeconds(
+        96'000, 96'000, 48'000.0, -1'370'774'700);
+    const auto positiveOffset = dawvr::mapProjectSampleToVideoTimeSeconds(
+        96'000, 96'000, 48'000.0, 250'000'000);
+    const auto oneSecondLater = dawvr::mapProjectSampleToVideoTimeSeconds(
+        144'000, 96'000, 48'000.0, -1'370'774'700);
+    const auto invalidRate = dawvr::mapProjectSampleToVideoTimeSeconds(
+        96'000, 96'000, 0.0, 0);
+    if (!negativeOffset.has_value() || !positiveOffset.has_value()
+        || !oneSecondLater.has_value() || invalidRate.has_value()
+        || std::abs(*negativeOffset - 1.3707747) > 0.0000001
+        || std::abs(*positiveOffset + 0.25) > 0.0000001
+        || std::abs(*oneSecondLater - 2.3707747) > 0.0000001)
+    {
+        std::cerr << "Video synchronization mapping self-test failed\n";
+        return false;
+    }
+
+    std::cout << "Playback policy and synchronization mapping self-test passed\n";
+    return true;
+}
 } // namespace
 
 int main(int argc, char** argv)
 {
+    if (argc == 3 && std::string_view(argv[1]) == "--decode-file")
+    {
+        dawvr::MFVideoDecoder decoder;
+        if (!decoder.open(juce::File::createFileWithoutCheckingPath(argv[2])))
+        {
+            std::cerr << "Decoder open failed: " << decoder.getLastError() << '\n';
+            return 31;
+        }
+        const auto frame = decoder.decodeFrameAt(decoder.getDurationSeconds() * 0.5);
+        if (!frame.isValid())
+        {
+            std::cerr << "Frame decode failed: " << decoder.getLastError() << '\n';
+            return 32;
+        }
+        std::cout << "Decoded " << frame.getWidth() << 'x' << frame.getHeight()
+                  << " frame from " << decoder.getDurationSeconds() << " second MP4\n";
+        return 0;
+    }
+
+    if (argc == 2 && std::string_view(argv[1]) == "--playback-logic-only")
+        return runPlaybackLogicSelfTest() ? 0 : 29;
+
     if (argc == 2 && std::string_view(argv[1]) == "--response-routing-only")
     {
         using dawvr::detail::responseCompletesRequest;
@@ -408,6 +491,56 @@ int main(int argc, char** argv)
         {
             return 8;
         }
+
+        const auto validateRecordedPlayback = [](const dawvr::FinalizedTakeInfo& take) {
+            const auto metadataJson =
+                juce::JSON::parse(juce::File(take.metadataPath).loadFileAsString());
+            const auto* metadataObject = metadataJson.getDynamicObject();
+            if (metadataObject == nullptr)
+                return false;
+
+            dawvr::MFVideoDecoder decoder;
+            if (!decoder.open(juce::File(take.videoPath)))
+            {
+                std::cerr << "Recorded decoder open failed: " << decoder.getLastError() << '\n';
+                return false;
+            }
+            if (decoder.getDurationSeconds() <= 0.0)
+            {
+                std::cerr << "Recorded decoder reported no duration\n";
+                return false;
+            }
+
+            const auto startSample = static_cast<juce::int64>(
+                metadataObject->getProperty("start_project_sample"));
+            const auto sampleRate = static_cast<double>(
+                metadataObject->getProperty("sample_rate"));
+            const auto syncOffset = static_cast<juce::int64>(
+                metadataObject->getProperty("sync_offset_ns"));
+            const auto middleVideoTime = decoder.getDurationSeconds() * 0.5;
+            const auto middleProjectSample = startSample + static_cast<juce::int64>(
+                std::llround((middleVideoTime
+                              + static_cast<double>(syncOffset) / 1'000'000'000.0)
+                             * sampleRate));
+            const auto mappedTime = dawvr::mapProjectSampleToVideoTimeSeconds(
+                middleProjectSample, startSample, sampleRate, syncOffset);
+            if (!mappedTime.has_value()
+                || std::abs(*mappedTime - middleVideoTime) > (1.0 / sampleRate))
+            {
+                return false;
+            }
+
+            const auto frame = decoder.decodeFrameAt(*mappedTime);
+            if (!frame.isValid())
+                std::cerr << "Recorded frame decode failed: " << decoder.getLastError() << '\n';
+            return frame.isValid();
+        };
+        if (!validateRecordedPlayback(finalizedTake))
+        {
+            std::cerr << "Finalized MP4 could not be mapped and decoded for GUI playback\n";
+            return 30;
+        }
+        std::cout << "Finalized MP4 GUI playback decode passed\n";
         if (firstFinalizedTake.videoPath == finalizedTake.videoPath
             || firstFinalizedTake.videoPath == sharedFinalizedTake.videoPath
             || finalizedTake.videoPath == sharedFinalizedTake.videoPath)

@@ -289,6 +289,20 @@ The Rust session state machine uses the callback monotonic timestamp for recordi
 
 Successful takes are atomically promoted from `<stem>.mp4.part` to `<stem>.mp4`, then receive `<stem>.sync.json` metadata. The GUI take browser accepts both this current metadata name and the legacy `<stem>.mp4.json` form. A `.part` file is never presented as a finalized take.
 
+`sync_offset_ns` is `first_frame_monotonic_time_ns - corrected_start_monotonic_time_ns`.
+Recorded playback maps a DAW position to time since the first MP4 frame as
+`(current_project_sample - start_project_sample) / sample_rate - sync_offset_ns / 1e9`.
+A negative offset means the MP4 begins before the DAW take start. Auto view selects recorded
+playback while the DAW is playing and a take is selected, even if Record Arm remains enabled;
+active DAW recording still selects live preview. This is a GUI-internal policy and does not
+change the wire protocol or `PluginProcessor` facade.
+
+Finalized paths may use the Windows extended-path `\\?\` prefix. GUI code must not rewrite the
+stored metadata path, but `MFVideoDecoder` removes that prefix from the path passed to
+`MFCreateSourceReaderFromURL` because the source reader rejects otherwise valid local MP4 files
+in that form. UNC extended paths are converted from `\\?\UNC\server\share` to
+`\\server\share` for the same call.
+
 The GUI may display state and finalized paths. It does not decide when a take begins or ends.
 
 ## 11. Current limitations and planned extensions

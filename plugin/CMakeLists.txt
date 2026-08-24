@@ -29,7 +29,8 @@ target_sources(DAWVideoRecorderPlugin PRIVATE
     src/TakeSyncManager.h
     src/TransportSnapshot.h
     src/VideoPreviewComponent.cpp
-    src/VideoPreviewComponent.h)
+    src/VideoPreviewComponent.h
+    src/VideoPlaybackPolicy.h)
 
 target_compile_features(DAWVideoRecorderPlugin PRIVATE cxx_std_20)
 

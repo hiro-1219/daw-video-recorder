@@ -245,14 +245,13 @@ bool TakeSyncManager::isSampleInRange(std::int64_t currentProjectSample) const
 std::optional<double> TakeSyncManager::calculateVideoTimeSeconds(std::int64_t currentProjectSample) const
 {
     const auto take = getSelectedTake();
-    if (!take.has_value() || take->sampleRate <= 0.0)
+    if (!take.has_value())
         return std::nullopt;
 
-    const auto sampleDelta = currentProjectSample - take->startProjectSample;
-    const double rawSeconds = static_cast<double>(sampleDelta) / take->sampleRate;
-    const double offsetSeconds = static_cast<double>(take->syncOffsetNs) / 1'000'000'000.0;
-
-    return rawSeconds + offsetSeconds;
+    return mapProjectSampleToVideoTimeSeconds(currentProjectSample,
+                                              take->startProjectSample,
+                                              take->sampleRate,
+                                              take->syncOffsetNs);
 }
 
 std::uint64_t TakeSyncManager::getRevision() const

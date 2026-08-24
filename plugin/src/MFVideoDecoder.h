@@ -23,6 +23,7 @@ public:
     [[nodiscard]] int getWidth() const noexcept;
     [[nodiscard]] int getHeight() const noexcept;
     [[nodiscard]] const juce::File& getCurrentFile() const noexcept;
+    [[nodiscard]] juce::String getLastError() const;
 
     // Decodes a video frame closest to the specified time (in seconds).
     // Returns a valid juce::Image on success, or an invalid image on failure.

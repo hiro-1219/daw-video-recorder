@@ -52,6 +52,7 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse)
             previewComponent.setViewMode(VideoViewMode::recordedTake);
         else if (id == 3)
             previewComponent.setViewMode(VideoViewMode::liveCamera);
+        updateVideoPlayback();
         updatePreviewLifecycle();
     };
     addAndMakeVisible(viewModeSelector);
@@ -157,6 +158,7 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse)
     processor.startServiceClient();
     processor.requestSourceRefresh();
     processor.takeSyncManager().refreshTakes(processor.projectRoot(), processor.persistentInstanceId());
+    updateVideoPlayback();
     updatePreviewLifecycle();
 
     startTimerHz(30);
@@ -327,10 +329,9 @@ void PluginEditor::timerCallback()
                                         wasRecording,
                                         duration);
 
-    updatePreviewLifecycle();
-
     // Update synchronized recorded video playback
     updateVideoPlayback();
+    updatePreviewLifecycle();
 }
 
 void PluginEditor::updateVideoPlayback()
@@ -341,10 +342,18 @@ void PluginEditor::updateVideoPlayback()
     pbState.isDawRecording = processor.isDawRecording();
     pbState.isArmed = processor.isArmed();
     pbState.currentDawSample = processor.currentProjectSample();
+    pbState.hasTake = selectedTake.has_value();
+    currentPresentationSource = resolveVideoPresentationSource({
+        previewComponent.getViewMode(),
+        pbState.isDawPlaying,
+        pbState.isDawRecording,
+        pbState.isArmed,
+        pbState.hasTake,
+    });
+    pbState.presentationSource = currentPresentationSource;
 
     if (selectedTake.has_value())
     {
-        pbState.hasTake = true;
         pbState.takeLabel = selectedTake->takeId.isNotEmpty()
                                 ? selectedTake->takeId
                                 : juce::File(selectedTake->videoPath).getFileName();
@@ -355,26 +364,25 @@ void PluginEditor::updateVideoPlayback()
                                        / selectedTake->sampleRate;
         }
 
-        const auto viewMode = previewComponent.getViewMode();
-        const auto shouldDecodeRecordedTake = viewMode == VideoViewMode::recordedTake
-                                              || (viewMode == VideoViewMode::autoSync
-                                                  && !pbState.isArmed
-                                                  && !pbState.isDawRecording);
-
-        if (shouldDecodeRecordedTake)
+        if (currentPresentationSource == VideoPresentationSource::recordedTake)
         {
             if (currentLoadedVideoFile != selectedTake->videoPath)
             {
                 videoDecoder.close();
                 currentLoadedVideoFile = selectedTake->videoPath;
+                previewComponent.clearRecordedFrame();
                 if (!videoDecoder.open(juce::File(selectedTake->videoPath)))
-                    currentLoadedVideoFile.clear();
+                    pbState.recordedStatus = VideoPreviewComponent::RecordedPlaybackStatus::decoderError;
             }
 
-            if (videoDecoder.getDurationSeconds() > 0.0)
+            if (videoDecoder.isOpen() && videoDecoder.getDurationSeconds() > 0.0)
                 pbState.totalDurationSec = videoDecoder.getDurationSeconds();
 
-            if (processor.isProjectSampleValid())
+            if (!videoDecoder.isOpen())
+            {
+                pbState.recordedStatus = VideoPreviewComponent::RecordedPlaybackStatus::decoderError;
+            }
+            else if (processor.isProjectSampleValid())
             {
                 const auto maybeTimeSec = processor.takeSyncManager().calculateVideoTimeSeconds(
                     processor.currentProjectSample());
@@ -386,24 +394,30 @@ void PluginEditor::updateVideoPlayback()
                         && (pbState.totalDurationSec <= 0.0
                             || timeSec <= pbState.totalDurationSec + 0.1))
                     {
-                        pbState.isOutOfRange = false;
                         const auto frame = videoDecoder.decodeFrameAt(timeSec);
                         if (frame.isValid())
+                        {
                             previewComponent.setRecordedFrame(frame);
+                            pbState.recordedStatus = VideoPreviewComponent::RecordedPlaybackStatus::ready;
+                        }
+                        else
+                        {
+                            pbState.recordedStatus = VideoPreviewComponent::RecordedPlaybackStatus::decoderError;
+                        }
                     }
                     else
                     {
-                        pbState.isOutOfRange = true;
+                        pbState.recordedStatus = VideoPreviewComponent::RecordedPlaybackStatus::outOfRange;
                     }
                 }
                 else
                 {
-                    pbState.isOutOfRange = true;
+                    pbState.recordedStatus = VideoPreviewComponent::RecordedPlaybackStatus::positionUnavailable;
                 }
             }
             else
             {
-                pbState.isOutOfRange = true;
+                pbState.recordedStatus = VideoPreviewComponent::RecordedPlaybackStatus::positionUnavailable;
             }
         }
         else
@@ -413,7 +427,6 @@ void PluginEditor::updateVideoPlayback()
                 videoDecoder.close();
                 currentLoadedVideoFile.clear();
             }
-            pbState.isOutOfRange = true;
         }
     }
     else
@@ -423,8 +436,8 @@ void PluginEditor::updateVideoPlayback()
             videoDecoder.close();
             currentLoadedVideoFile.clear();
         }
-        pbState.hasTake = false;
-        pbState.isOutOfRange = true;
+        previewComponent.clearRecordedFrame();
+        pbState.recordedStatus = VideoPreviewComponent::RecordedPlaybackStatus::noTake;
     }
 
     previewComponent.updatePlaybackState(pbState);
@@ -432,13 +445,8 @@ void PluginEditor::updateVideoPlayback()
 
 void PluginEditor::updatePreviewLifecycle()
 {
-    const auto viewMode = previewComponent.getViewMode();
-    const auto hasTake = processor.takeSyncManager().getSelectedTake().has_value();
-    const auto wantsLivePreview = viewMode == VideoViewMode::liveCamera
-                                  || (viewMode == VideoViewMode::autoSync
-                                      && (processor.isArmed()
-                                          || processor.isDawRecording()
-                                          || !hasTake));
+    const auto wantsLivePreview = currentPresentationSource
+                                  == VideoPresentationSource::liveCamera;
 
     if (!previewLifecycleInitialized || previewStreamingEnabled != wantsLivePreview)
     {

@@ -2,27 +2,31 @@
 #pragma once
 
 #include "ServiceClient.h"
+#include "VideoPlaybackPolicy.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
 namespace dawvr
 {
-enum class VideoViewMode
-{
-    autoSync = 0,
-    recordedTake = 1,
-    liveCamera = 2
-};
-
 class VideoPreviewComponent final : public juce::Component, private juce::Timer
 {
 public:
+    enum class RecordedPlaybackStatus
+    {
+        noTake,
+        positionUnavailable,
+        outOfRange,
+        decoderError,
+        ready
+    };
+
     struct PlaybackState final
     {
+        VideoPresentationSource presentationSource{ VideoPresentationSource::liveCamera };
+        RecordedPlaybackStatus recordedStatus{ RecordedPlaybackStatus::noTake };
         bool isDawPlaying{ false };
         bool isDawRecording{ false };
         bool isArmed{ false };
-        bool isOutOfRange{ false };
         bool hasTake{ false };
         juce::String takeLabel;
         double currentVideoTimeSec{ 0.0 };
@@ -50,6 +54,7 @@ public:
 
     void setLiveFrameData(const ServiceClient::PreviewFrameData& frame);
     void setRecordedFrame(const juce::Image& image);
+    void clearRecordedFrame();
 
     [[nodiscard]] bool isPreviewStreamingRequested() const noexcept;
 

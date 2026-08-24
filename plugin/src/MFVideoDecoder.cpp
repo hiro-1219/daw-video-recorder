@@ -27,12 +27,15 @@ struct MFVideoDecoder::Impl
     juce::Image cachedImage;
     double cachedTime{ -1.0 };
     bool mfInitialized{ false };
+    juce::String lastError;
 
     Impl()
     {
         HRESULT hr = MFStartup(MF_VERSION, MFSTARTUP_FULL);
         if (SUCCEEDED(hr))
             mfInitialized = true;
+        else
+            lastError = "MFStartup failed (HRESULT " + juce::String::toHexString(hr) + ")";
     }
 
     ~Impl()
@@ -57,40 +60,57 @@ struct MFVideoDecoder::Impl
         cachedTime = -1.0;
     }
 
+    bool fail(const char* operation, HRESULT result = S_OK)
+    {
+        lastError = operation;
+        if (FAILED(result))
+            lastError += " (HRESULT " + juce::String::toHexString(result) + ")";
+        return false;
+    }
+
     bool open(const juce::File& file)
     {
         const juce::ScopedLock sl(lock);
         close();
+        lastError.clear();
 
         if (!file.existsAsFile())
-            return false;
+            return fail("Video file does not exist");
+        if (!mfInitialized)
+            return fail("Media Foundation is not initialized");
 
         ComPtr<IMFAttributes> attributes;
         HRESULT hr = MFCreateAttributes(&attributes, 2);
         if (FAILED(hr))
-            return false;
+            return fail("MFCreateAttributes failed", hr);
 
         // Enable video processing and low latency reading
         attributes->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
         attributes->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
 
+        auto sourcePath = file.getFullPathName();
+        if (sourcePath.startsWith("\\\\?\\UNC\\"))
+            sourcePath = "\\\\" + sourcePath.substring(8);
+        else if (sourcePath.startsWith("\\\\?\\"))
+            sourcePath = sourcePath.substring(4);
+
         ComPtr<IMFSourceReader> reader;
-        hr = MFCreateSourceReaderFromURL(file.getFullPathName().toWideCharPointer(), attributes.Get(), &reader);
+        hr = MFCreateSourceReaderFromURL(sourcePath.toWideCharPointer(), attributes.Get(), &reader);
         if (FAILED(hr))
-            return false;
+            return fail("MFCreateSourceReaderFromURL failed", hr);
 
         // Set output media type to uncompressed RGB32
         ComPtr<IMFMediaType> mediaType;
         hr = MFCreateMediaType(&mediaType);
         if (FAILED(hr))
-            return false;
+            return fail("MFCreateMediaType failed", hr);
 
         mediaType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
         mediaType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
 
         hr = reader->SetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, mediaType.Get());
         if (FAILED(hr))
-            return false;
+            return fail("SetCurrentMediaType RGB32 failed", hr);
 
         // Deselect all audio streams to speed up video decoding
         reader->SetStreamSelection(static_cast<DWORD>(MF_SOURCE_READER_ALL_STREAMS), FALSE);
@@ -100,12 +120,12 @@ struct MFVideoDecoder::Impl
         ComPtr<IMFMediaType> currentType;
         hr = reader->GetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), &currentType);
         if (FAILED(hr))
-            return false;
+            return fail("GetCurrentMediaType failed", hr);
 
         UINT32 width = 0, height = 0;
         hr = MFGetAttributeSize(currentType.Get(), MF_MT_FRAME_SIZE, &width, &height);
         if (FAILED(hr) || width == 0 || height == 0)
-            return false;
+            return fail("Video frame size is unavailable", hr);
 
         videoWidth = static_cast<int>(width);
         videoHeight = static_cast<int>(height);
@@ -134,6 +154,7 @@ struct MFVideoDecoder::Impl
 
         currentFile = file;
         sourceReader = reader;
+        lastError.clear();
         return true;
     }
 
@@ -141,7 +162,10 @@ struct MFVideoDecoder::Impl
     {
         const juce::ScopedLock sl(lock);
         if (!sourceReader || videoWidth <= 0 || videoHeight <= 0)
+        {
+            lastError = "Video decoder is not open";
             return {};
+        }
 
         // Clamp target time
         const double clampedTime = juce::jlimit(0.0, juce::jmax(0.0, durationSeconds), timeInSeconds);
@@ -160,7 +184,11 @@ struct MFVideoDecoder::Impl
         HRESULT hr = sourceReader->SetCurrentPosition(GUID_NULL, varPosition);
         PropVariantClear(&varPosition);
         if (FAILED(hr))
+        {
+            lastError = "SetCurrentPosition failed (HRESULT "
+                        + juce::String::toHexString(hr) + ")";
             return cachedImage;
+        }
 
         // Read sample
         DWORD streamIndex = 0;
@@ -187,18 +215,29 @@ struct MFVideoDecoder::Impl
         }
 
         if (!sample)
+        {
+            lastError = "No video sample was returned for the requested time";
             return cachedImage;
+        }
 
         ComPtr<IMFMediaBuffer> mediaBuffer;
         hr = sample->ConvertToContiguousBuffer(&mediaBuffer);
         if (FAILED(hr) || !mediaBuffer)
+        {
+            lastError = "ConvertToContiguousBuffer failed (HRESULT "
+                        + juce::String::toHexString(hr) + ")";
             return cachedImage;
+        }
 
         BYTE* bufferData = nullptr;
         DWORD maxLength = 0, currentLength = 0;
         hr = mediaBuffer->Lock(&bufferData, &maxLength, &currentLength);
         if (FAILED(hr) || bufferData == nullptr)
+        {
+            lastError = "Media buffer lock failed (HRESULT "
+                        + juce::String::toHexString(hr) + ")";
             return cachedImage;
+        }
 
         juce::Image image(juce::Image::ARGB, videoWidth, videoHeight, false);
         juce::Image::BitmapData destBitmap(image, juce::Image::BitmapData::writeOnly);
@@ -224,6 +263,7 @@ struct MFVideoDecoder::Impl
 
         cachedImage = image;
         cachedTime = clampedTime;
+        lastError.clear();
         return image;
     }
 };
@@ -268,6 +308,12 @@ int MFVideoDecoder::getHeight() const noexcept
 const juce::File& MFVideoDecoder::getCurrentFile() const noexcept
 {
     return pimpl->currentFile;
+}
+
+juce::String MFVideoDecoder::getLastError() const
+{
+    const juce::ScopedLock sl(pimpl->lock);
+    return pimpl->lastError;
 }
 
 juce::Image MFVideoDecoder::decodeFrameAt(double timeInSeconds)
