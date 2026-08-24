@@ -55,6 +55,8 @@ video_time_seconds = (current_sample - start_project_sample) / sample_rate
 
 録画サービスのメタデータはWindows拡張パスの`\\?\`接頭辞を含む場合があります。`MFVideoDecoder`はファイル存在確認にはそのパスを保持し、`MFCreateSourceReaderFromURL`へ渡す際だけ通常のドライブ／UNCパスへ正規化します。これを行わない場合、有効なH.264 MP4でもMedia Foundationが開けません。
 
+録画済み映像のファイルオープン、シーク、H.264デコード、RGB画像変換は低優先度の`RecordedPlaybackWorker`で実行します。GUIタイマーはDAW時刻を非同期に要求し、完成済みスナップショットだけを取得するため、Media Foundationの処理を待ちません。要求は容量1相当の最新値へ集約し15fpsに制限します。通常の前進再生はSource Readerを連続読み出しし、逆方向または0.25秒を超えるジャンプだけを再シークします。画像変換時にアスペクト比を維持して640x360以下へ間引き、GUIへ渡すメモリ量と描画負荷も抑えます。
+
 ---
 
 ## 2. 技術スタック選定

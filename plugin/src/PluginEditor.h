@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #pragma once
 
-#include "MFVideoDecoder.h"
 #include "PluginProcessor.h"
+#include "RecordedPlaybackWorker.h"
 #include "VideoPreviewComponent.h"
 
 #include <juce_gui_extra/juce_gui_extra.h>
@@ -30,7 +30,7 @@ private:
     void updatePreviewLifecycle();
 
     PluginProcessor& processor;
-    MFVideoDecoder videoDecoder;
+    RecordedPlaybackWorker recordedPlaybackWorker;
 
     // Header
     juce::Label titleLabel;
@@ -76,7 +76,8 @@ private:
     std::uint64_t displayedTakeRevision{};
     std::uint64_t displayedTakeManagerRevision{};
     juce::String currentVideoPath;
-    juce::String currentLoadedVideoFile;
+    juce::String currentRequestedVideoFile;
+    std::uint64_t lastRecordedFrameRevision{};
     VideoPresentationSource currentPresentationSource{ VideoPresentationSource::liveCamera };
     bool previewStreamingEnabled{ false };
     bool previewLifecycleInitialized{ false };

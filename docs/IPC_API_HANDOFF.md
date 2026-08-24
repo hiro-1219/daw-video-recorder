@@ -303,6 +303,14 @@ stored metadata path, but `MFVideoDecoder` removes that prefix from the path pas
 in that form. UNC extended paths are converted from `\\?\UNC\server\share` to
 `\\server\share` for the same call.
 
+Recorded-file decoding never runs on the DAW audio callback or the JUCE message thread.
+`RecordedPlaybackWorker` owns `MFVideoDecoder` on a low-priority thread, coalesces requests to the
+latest DAW time, and publishes copied JUCE image snapshots. The GUI only submits a non-blocking
+request and copies the latest completed snapshot. Playback requests are limited to 15 fps;
+forward motion within 0.25 seconds reads sequentially, while backward or discontinuous movement
+seeks. Converted preview images are bounded to 640x360 while preserving aspect ratio. Stopping
+recorded presentation signals the worker to close the source without touching transport delivery.
+
 The GUI may display state and finalized paths. It does not decide when a take begins or ends.
 
 ## 11. Current limitations and planned extensions

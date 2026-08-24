@@ -80,12 +80,15 @@ void VideoPreviewComponent::setLiveFrameData(const ServiceClient::PreviewFrameDa
             const auto* srcPtr = frame.frameData.data();
             for (int y = 0; y < static_cast<int>(frame.height); ++y)
             {
+                auto* destRow = destData.data + (y * destData.lineStride);
                 for (int x = 0; x < static_cast<int>(frame.width); ++x)
                 {
                     const auto r = *srcPtr++;
                     const auto g = *srcPtr++;
                     const auto b = *srcPtr++;
-                    destData.setPixelColour(x, y, juce::Colour(r, g, b));
+                    auto* pixel = reinterpret_cast<juce::PixelRGB*>(
+                        destRow + (x * destData.pixelStride));
+                    pixel->setARGB(0xff, r, g, b);
                 }
             }
         }

@@ -9,6 +9,9 @@
 #include <propvarutil.h>
 #include <wrl/client.h>
 
+#include <algorithm>
+#include <cmath>
+
 namespace dawvr
 {
 using Microsoft::WRL::ComPtr;
@@ -18,6 +21,8 @@ struct MFVideoDecoder::Impl
     juce::CriticalSection lock;
     juce::File currentFile;
     ComPtr<IMFSourceReader> sourceReader;
+    int sourceFrameWidth{ 0 };
+    int sourceFrameHeight{ 0 };
     int videoWidth{ 0 };
     int videoHeight{ 0 };
     double durationSeconds{ 0.0 };
@@ -26,6 +31,7 @@ struct MFVideoDecoder::Impl
 
     juce::Image cachedImage;
     double cachedTime{ -1.0 };
+    double lastDecodedTimeSeconds{ -1.0 };
     bool mfInitialized{ false };
     juce::String lastError;
 
@@ -53,11 +59,14 @@ struct MFVideoDecoder::Impl
         const juce::ScopedLock sl(lock);
         sourceReader.Reset();
         currentFile = {};
+        sourceFrameWidth = 0;
+        sourceFrameHeight = 0;
         videoWidth = 0;
         videoHeight = 0;
         durationSeconds = 0.0;
         cachedImage = {};
         cachedTime = -1.0;
+        lastDecodedTimeSeconds = -1.0;
     }
 
     bool fail(const char* operation, HRESULT result = S_OK)
@@ -127,8 +136,17 @@ struct MFVideoDecoder::Impl
         if (FAILED(hr) || width == 0 || height == 0)
             return fail("Video frame size is unavailable", hr);
 
-        videoWidth = static_cast<int>(width);
-        videoHeight = static_cast<int>(height);
+        sourceFrameWidth = static_cast<int>(width);
+        sourceFrameHeight = static_cast<int>(height);
+
+        constexpr int maximumPreviewWidth = 640;
+        constexpr int maximumPreviewHeight = 360;
+        const auto previewScale = juce::jmin(
+            1.0,
+            juce::jmin(static_cast<double>(maximumPreviewWidth) / sourceFrameWidth,
+                       static_cast<double>(maximumPreviewHeight) / sourceFrameHeight));
+        videoWidth = juce::jmax(1, static_cast<int>(sourceFrameWidth * previewScale));
+        videoHeight = juce::jmax(1, static_cast<int>(sourceFrameHeight * previewScale));
 
         // Check stride
         stride = 0;
@@ -161,44 +179,54 @@ struct MFVideoDecoder::Impl
     juce::Image decodeFrameAt(double timeInSeconds)
     {
         const juce::ScopedLock sl(lock);
-        if (!sourceReader || videoWidth <= 0 || videoHeight <= 0)
+        if (!sourceReader || sourceFrameWidth <= 0 || sourceFrameHeight <= 0
+            || videoWidth <= 0 || videoHeight <= 0)
         {
             lastError = "Video decoder is not open";
             return {};
         }
 
-        // Clamp target time
-        const double clampedTime = juce::jlimit(0.0, juce::jmax(0.0, durationSeconds), timeInSeconds);
+        // Avoid seeking to the exact end-of-stream position, where no sample may exist.
+        const auto lastDecodableTime = durationSeconds > 0.001
+                                           ? durationSeconds - 0.001
+                                           : juce::jmax(0.0, durationSeconds);
+        const double clampedTime = juce::jlimit(0.0, lastDecodableTime, timeInSeconds);
 
-        // If requested time is very close to cached time, return cached image directly
-        if (cachedImage.isValid() && std::abs(clampedTime - cachedTime) < 0.015) // ~1 frame at 60fps
-            return cachedImage;
-
-        // Convert seconds to 100-nanosecond units for Media Foundation seek
-        LONGLONG seekPos100Ns = static_cast<LONGLONG>(clampedTime * 10'000'000.0);
-        PROPVARIANT varPosition;
-        PropVariantInit(&varPosition);
-        varPosition.vt = VT_I8;
-        varPosition.hVal.QuadPart = seekPos100Ns;
-
-        HRESULT hr = sourceReader->SetCurrentPosition(GUID_NULL, varPosition);
-        PropVariantClear(&varPosition);
-        if (FAILED(hr))
+        bool needsSeek = true;
+        if (cachedImage.isValid())
         {
-            lastError = "SetCurrentPosition failed (HRESULT "
-                        + juce::String::toHexString(hr) + ")";
-            return cachedImage;
+            const auto deltaSeconds = clampedTime - cachedTime;
+            if (std::abs(deltaSeconds) < (1.0 / 60.0))
+                return cachedImage;
+            needsSeek = deltaSeconds <= 0.0 || deltaSeconds > 0.25;
         }
 
-        // Read sample
+        HRESULT hr = S_OK;
+        if (needsSeek)
+        {
+            const auto seekPos100Ns = static_cast<LONGLONG>(clampedTime * 10'000'000.0);
+            PROPVARIANT varPosition;
+            PropVariantInit(&varPosition);
+            varPosition.vt = VT_I8;
+            varPosition.hVal.QuadPart = seekPos100Ns;
+            hr = sourceReader->SetCurrentPosition(GUID_NULL, varPosition);
+            PropVariantClear(&varPosition);
+            if (FAILED(hr))
+            {
+                lastError = "SetCurrentPosition failed (HRESULT "
+                            + juce::String::toHexString(hr) + ")";
+                return cachedImage;
+            }
+        }
+
         DWORD streamIndex = 0;
         DWORD flags = 0;
         LONGLONG timeStamp = 0;
         ComPtr<IMFSample> sample;
-
-        // Try reading up to 5 times in case of stream ticks
-        for (int attempts = 0; attempts < 5; ++attempts)
+        const auto maximumReadAttempts = needsSeek ? 120 : 32;
+        for (int attempts = 0; attempts < maximumReadAttempts; ++attempts)
         {
+            sample.Reset();
             hr = sourceReader->ReadSample(
                 static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM),
                 0,
@@ -210,7 +238,11 @@ struct MFVideoDecoder::Impl
             if (FAILED(hr) || (flags & MF_SOURCE_READERF_ENDOFSTREAM))
                 break;
 
-            if (sample != nullptr)
+            if (sample == nullptr)
+                continue;
+
+            const auto sampleTimeSeconds = static_cast<double>(timeStamp) / 10'000'000.0;
+            if (sampleTimeSeconds >= clampedTime - (1.0 / 120.0))
                 break;
         }
 
@@ -239,30 +271,36 @@ struct MFVideoDecoder::Impl
             return cachedImage;
         }
 
-        juce::Image image(juce::Image::ARGB, videoWidth, videoHeight, false);
+        juce::Image image(juce::Image::ARGB, videoWidth, videoHeight, true);
         juce::Image::BitmapData destBitmap(image, juce::Image::BitmapData::writeOnly);
 
-        const int rowBytes = (stride > 0) ? stride : (videoWidth * 4);
+        const int rowBytes = (stride > 0) ? stride : (sourceFrameWidth * 4);
 
         for (int y = 0; y < videoHeight; ++y)
         {
-            const int srcY = isBottomUp ? (videoHeight - 1 - y) : y;
+            const auto scaledSourceY = (y * sourceFrameHeight) / videoHeight;
+            const int srcY = isBottomUp ? (sourceFrameHeight - 1 - scaledSourceY)
+                                        : scaledSourceY;
             const BYTE* srcRow = bufferData + (srcY * rowBytes);
+            auto* destRow = destBitmap.data + (y * destBitmap.lineStride);
 
             for (int x = 0; x < videoWidth; ++x)
             {
-                // RGB32 in Media Foundation is stored as BGRA / BGR0
-                const BYTE b = srcRow[x * 4 + 0];
-                const BYTE g = srcRow[x * 4 + 1];
-                const BYTE r = srcRow[x * 4 + 2];
-                destBitmap.setPixelColour(x, y, juce::Colour(r, g, b));
+                const auto sourceX = (x * sourceFrameWidth) / videoWidth;
+                const BYTE b = srcRow[sourceX * 4 + 0];
+                const BYTE g = srcRow[sourceX * 4 + 1];
+                const BYTE r = srcRow[sourceX * 4 + 2];
+                auto* pixel = reinterpret_cast<juce::PixelARGB*>(
+                    destRow + (x * destBitmap.pixelStride));
+                pixel->setARGB(0xff, r, g, b);
             }
         }
 
         mediaBuffer->Unlock();
 
         cachedImage = image;
-        cachedTime = clampedTime;
+        cachedTime = static_cast<double>(timeStamp) / 10'000'000.0;
+        lastDecodedTimeSeconds = cachedTime;
         lastError.clear();
         return image;
     }
@@ -308,6 +346,11 @@ int MFVideoDecoder::getHeight() const noexcept
 const juce::File& MFVideoDecoder::getCurrentFile() const noexcept
 {
     return pimpl->currentFile;
+}
+
+double MFVideoDecoder::getLastDecodedTimeSeconds() const noexcept
+{
+    return pimpl->lastDecodedTimeSeconds;
 }
 
 juce::String MFVideoDecoder::getLastError() const

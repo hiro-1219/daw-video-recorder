@@ -7,6 +7,8 @@ target_sources(DAWVideoRecorderIpcSmoke PRIVATE
     ../../plugin/src/MFVideoDecoder.h
     ../../plugin/src/ProtocolCodec.cpp
     ../../plugin/src/ProtocolCodec.h
+    ../../plugin/src/RecordedPlaybackWorker.cpp
+    ../../plugin/src/RecordedPlaybackWorker.h
     ../../plugin/src/ServiceClient.cpp
     ../../plugin/src/ServiceClient.h
     ../../plugin/src/SpscQueue.h

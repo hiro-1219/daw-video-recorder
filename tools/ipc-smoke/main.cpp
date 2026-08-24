@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include "ServiceClient.h"
 #include "MFVideoDecoder.h"
+#include "RecordedPlaybackWorker.h"
 #include "VideoPlaybackPolicy.h"
 
 #include <juce_core/juce_core.h>
@@ -77,6 +78,32 @@ bool runPlaybackLogicSelfTest()
     std::cout << "Playback policy and synchronization mapping self-test passed\n";
     return true;
 }
+
+std::optional<dawvr::RecordedPlaybackWorker::Snapshot> waitForPlaybackFrame(
+    dawvr::RecordedPlaybackWorker& worker,
+    const juce::String& videoPath,
+    std::uint64_t afterRevision,
+    std::uint32_t timeoutMs = 5000U)
+{
+    const auto deadline = juce::Time::getMillisecondCounter() + timeoutMs;
+    while (juce::Time::getMillisecondCounter() < deadline)
+    {
+        const auto snapshot = worker.getLatestSnapshot();
+        if (snapshot.videoPath == videoPath && snapshot.revision > afterRevision)
+        {
+            if (snapshot.status == dawvr::RecordedPlaybackWorker::Status::ready)
+                return snapshot;
+            if (snapshot.status == dawvr::RecordedPlaybackWorker::Status::error)
+            {
+                std::cerr << "Background playback failed: " << snapshot.errorText << '\n';
+                return std::nullopt;
+            }
+        }
+        juce::Thread::sleep(10);
+    }
+    std::cerr << "Background playback timed out\n";
+    return std::nullopt;
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -97,6 +124,19 @@ int main(int argc, char** argv)
         }
         std::cout << "Decoded " << frame.getWidth() << 'x' << frame.getHeight()
                   << " frame from " << decoder.getDurationSeconds() << " second MP4\n";
+        return 0;
+    }
+
+    if (argc == 3 && std::string_view(argv[1]) == "--playback-worker-file")
+    {
+        const auto videoPath = juce::String::fromUTF8(argv[2]);
+        dawvr::RecordedPlaybackWorker worker;
+        worker.requestFrame(videoPath, 0.1);
+        const auto snapshot = waitForPlaybackFrame(worker, videoPath, 0);
+        if (!snapshot.has_value())
+            return 33;
+        std::cout << "Background worker decoded " << snapshot->image.getWidth() << 'x'
+                  << snapshot->image.getHeight() << " frame\n";
         return 0;
     }
 
@@ -499,13 +539,10 @@ int main(int argc, char** argv)
             if (metadataObject == nullptr)
                 return false;
 
-            dawvr::MFVideoDecoder decoder;
-            if (!decoder.open(juce::File(take.videoPath)))
-            {
-                std::cerr << "Recorded decoder open failed: " << decoder.getLastError() << '\n';
-                return false;
-            }
-            if (decoder.getDurationSeconds() <= 0.0)
+            dawvr::RecordedPlaybackWorker worker;
+            worker.requestFrame(take.videoPath, 0.0);
+            const auto firstFrame = waitForPlaybackFrame(worker, take.videoPath, 0);
+            if (!firstFrame.has_value() || firstFrame->durationSeconds <= 0.0)
             {
                 std::cerr << "Recorded decoder reported no duration\n";
                 return false;
@@ -517,7 +554,7 @@ int main(int argc, char** argv)
                 metadataObject->getProperty("sample_rate"));
             const auto syncOffset = static_cast<juce::int64>(
                 metadataObject->getProperty("sync_offset_ns"));
-            const auto middleVideoTime = decoder.getDurationSeconds() * 0.5;
+            const auto middleVideoTime = firstFrame->durationSeconds * 0.5;
             const auto middleProjectSample = startSample + static_cast<juce::int64>(
                 std::llround((middleVideoTime
                               + static_cast<double>(syncOffset) / 1'000'000'000.0)
@@ -530,10 +567,23 @@ int main(int argc, char** argv)
                 return false;
             }
 
-            const auto frame = decoder.decodeFrameAt(*mappedTime);
-            if (!frame.isValid())
-                std::cerr << "Recorded frame decode failed: " << decoder.getLastError() << '\n';
-            return frame.isValid();
+            worker.requestFrame(take.videoPath, *mappedTime);
+            const auto middleFrame = waitForPlaybackFrame(
+                worker, take.videoPath, firstFrame->revision);
+            if (!middleFrame.has_value())
+                return false;
+
+            const auto sequentialTime = std::min(
+                *mappedTime + 0.1, middleFrame->durationSeconds - 0.01);
+            worker.requestFrame(take.videoPath, sequentialTime);
+            const auto sequentialFrame = waitForPlaybackFrame(
+                worker, take.videoPath, middleFrame->revision);
+            if (!sequentialFrame.has_value())
+                return false;
+
+            return sequentialFrame->image.isValid()
+                   && sequentialFrame->image.getWidth() <= 640
+                   && sequentialFrame->image.getHeight() <= 360;
         };
         if (!validateRecordedPlayback(finalizedTake))
         {

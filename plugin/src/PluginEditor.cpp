@@ -168,7 +168,7 @@ PluginEditor::~PluginEditor()
 {
     stopTimer();
     processor.setPreviewEnabled(false);
-    videoDecoder.close();
+    recordedPlaybackWorker.stopPlayback();
 }
 
 void PluginEditor::paint(juce::Graphics& graphics)
@@ -366,23 +366,21 @@ void PluginEditor::updateVideoPlayback()
 
         if (currentPresentationSource == VideoPresentationSource::recordedTake)
         {
-            if (currentLoadedVideoFile != selectedTake->videoPath)
+            if (currentRequestedVideoFile != selectedTake->videoPath)
             {
-                videoDecoder.close();
-                currentLoadedVideoFile = selectedTake->videoPath;
+                currentRequestedVideoFile = selectedTake->videoPath;
+                lastRecordedFrameRevision = 0;
                 previewComponent.clearRecordedFrame();
-                if (!videoDecoder.open(juce::File(selectedTake->videoPath)))
-                    pbState.recordedStatus = VideoPreviewComponent::RecordedPlaybackStatus::decoderError;
             }
 
-            if (videoDecoder.isOpen() && videoDecoder.getDurationSeconds() > 0.0)
-                pbState.totalDurationSec = videoDecoder.getDurationSeconds();
+            const auto decoderSnapshot = recordedPlaybackWorker.getLatestSnapshot();
+            const auto snapshotMatchesTake = decoderSnapshot.videoPath == selectedTake->videoPath;
+            const auto decoderDurationKnown = snapshotMatchesTake
+                                              && decoderSnapshot.durationSeconds > 0.0;
+            if (decoderDurationKnown)
+                pbState.totalDurationSec = decoderSnapshot.durationSeconds;
 
-            if (!videoDecoder.isOpen())
-            {
-                pbState.recordedStatus = VideoPreviewComponent::RecordedPlaybackStatus::decoderError;
-            }
-            else if (processor.isProjectSampleValid())
+            if (processor.isProjectSampleValid())
             {
                 const auto maybeTimeSec = processor.takeSyncManager().calculateVideoTimeSeconds(
                     processor.currentProjectSample());
@@ -391,16 +389,23 @@ void PluginEditor::updateVideoPlayback()
                     const auto timeSec = *maybeTimeSec;
                     pbState.currentVideoTimeSec = timeSec;
                     if (timeSec >= 0.0
-                        && (pbState.totalDurationSec <= 0.0
+                        && (!decoderDurationKnown
                             || timeSec <= pbState.totalDurationSec + 0.1))
                     {
-                        const auto frame = videoDecoder.decodeFrameAt(timeSec);
-                        if (frame.isValid())
+                        recordedPlaybackWorker.requestFrame(selectedTake->videoPath, timeSec);
+
+                        if (snapshotMatchesTake
+                            && decoderSnapshot.status == RecordedPlaybackWorker::Status::ready)
                         {
-                            previewComponent.setRecordedFrame(frame);
+                            if (decoderSnapshot.revision != lastRecordedFrameRevision)
+                            {
+                                lastRecordedFrameRevision = decoderSnapshot.revision;
+                                previewComponent.setRecordedFrame(decoderSnapshot.image);
+                            }
                             pbState.recordedStatus = VideoPreviewComponent::RecordedPlaybackStatus::ready;
                         }
-                        else
+                        else if (snapshotMatchesTake
+                                 && decoderSnapshot.status == RecordedPlaybackWorker::Status::error)
                         {
                             pbState.recordedStatus = VideoPreviewComponent::RecordedPlaybackStatus::decoderError;
                         }
@@ -422,19 +427,21 @@ void PluginEditor::updateVideoPlayback()
         }
         else
         {
-            if (currentLoadedVideoFile.isNotEmpty())
+            if (currentRequestedVideoFile.isNotEmpty())
             {
-                videoDecoder.close();
-                currentLoadedVideoFile.clear();
+                recordedPlaybackWorker.stopPlayback();
+                currentRequestedVideoFile.clear();
+                lastRecordedFrameRevision = 0;
             }
         }
     }
     else
     {
-        if (currentLoadedVideoFile.isNotEmpty())
+        if (currentRequestedVideoFile.isNotEmpty())
         {
-            videoDecoder.close();
-            currentLoadedVideoFile.clear();
+            recordedPlaybackWorker.stopPlayback();
+            currentRequestedVideoFile.clear();
+            lastRecordedFrameRevision = 0;
         }
         previewComponent.clearRecordedFrame();
         pbState.recordedStatus = VideoPreviewComponent::RecordedPlaybackStatus::noTake;

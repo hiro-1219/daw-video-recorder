@@ -20,6 +20,7 @@ public:
 
     [[nodiscard]] bool isOpen() const noexcept;
     [[nodiscard]] double getDurationSeconds() const noexcept;
+    [[nodiscard]] double getLastDecodedTimeSeconds() const noexcept;
     [[nodiscard]] int getWidth() const noexcept;
     [[nodiscard]] int getHeight() const noexcept;
     [[nodiscard]] const juce::File& getCurrentFile() const noexcept;
